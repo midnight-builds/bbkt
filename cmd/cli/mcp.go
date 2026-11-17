@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -204,35 +205,90 @@ func newHTTPHandler(s *mcp.Server, token string) http.Handler {
 		JSONResponse:   false,
 		SessionTimeout: httpSessionTimeout,
 	})
-	return auth.RequireBearerToken(staticTokenVerifier(token), nil)(h)
+	authed := auth.RequireBearerToken(staticTokenVerifier(token), nil)(h)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authed.ServeHTTP(&bearerChallengeWriter{ResponseWriter: w}, r)
+	})
+}
+
+// bearerChallengeWriter adds the RFC 6750 "WWW-Authenticate: Bearer"
+// challenge to 401 responses, which the SDK middleware omits when no OAuth
+// resource metadata URL is configured.
+type bearerChallengeWriter struct {
+	http.ResponseWriter
+}
+
+func (w *bearerChallengeWriter) WriteHeader(code int) {
+	if code == http.StatusUnauthorized && w.Header().Get("WWW-Authenticate") == "" {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="bbkt"`)
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+// Flush keeps SSE streaming working through the wrapper.
+func (w *bearerChallengeWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap lets http.ResponseController reach the underlying writer.
+func (w *bearerChallengeWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+// listenHTTP opens the listener for cfg and prints the startup banner to
+// stderrW. When cfg claims a loopback bind, the address actually bound is
+// checked too: a hostname such as "localhost" goes through the system
+// resolver and must not silently land on a non-loopback interface, which
+// would bypass the --allow-remote and explicit-token requirements.
+func listenHTTP(cfg *httpConfig, stderrW io.Writer) (net.Listener, error) {
+	ln, err := net.Listen("tcp", cfg.addr)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP listen on %s: %w", cfg.addr, err)
+	}
+	if !cfg.remote && !isLoopbackAddr(ln.Addr()) {
+		_ = ln.Close()
+		return nil, fmt.Errorf("refusing to serve: %s resolved to non-loopback address %s; use an IP literal or --allow-remote", cfg.addr, ln.Addr())
+	}
+
+	_, _ = fmt.Fprintf(stderrW, "Starting Bitbucket MCP Server on http://%s/ (HTTP Streamable)\n", ln.Addr())
+	if cfg.remote {
+		_, _ = fmt.Fprintln(stderrW, "\nWARNING: listening on a non-loopback address over cleartext HTTP (no TLS).")
+		_, _ = fmt.Fprintln(stderrW, "WARNING: the bearer token and all Bitbucket data cross the network unencrypted.")
+		_, _ = fmt.Fprintln(stderrW, "WARNING: put this server behind a TLS-terminating reverse proxy.")
+		_, _ = fmt.Fprintln(stderrW)
+	}
+	if cfg.generated {
+		_, _ = fmt.Fprintf(stderrW, "\nGenerated a random bearer token for this run (%s is unset):\n\n  %s\n\n", httpTokenEnv, cfg.token)
+		_, _ = fmt.Fprintln(stderrW, "Clients must send:  Authorization: Bearer <token>")
+		_, _ = fmt.Fprintf(stderrW, "Set %s to keep a stable token across restarts.\n\n", httpTokenEnv)
+	}
+	return ln, nil
+}
+
+// isLoopbackAddr reports whether a bound listener address is on loopback.
+func isLoopbackAddr(a net.Addr) bool {
+	tcp, ok := a.(*net.TCPAddr)
+	return ok && tcp.IP.IsLoopback()
+}
+
+// newHTTPServer returns the http.Server that serves s behind the bearer token.
+func newHTTPServer(s *mcp.Server, cfg *httpConfig) *http.Server {
+	return &http.Server{
+		Handler:           newHTTPHandler(s, cfg.token),
+		ReadHeaderTimeout: 3 * time.Second,
+	}
 }
 
 // serveHTTP listens on cfg.addr and serves s until the listener fails. All
 // operator-facing output goes to stderr so stdout stays clean.
 func serveHTTP(s *mcp.Server, cfg *httpConfig) error {
-	ln, err := net.Listen("tcp", cfg.addr)
+	ln, err := listenHTTP(cfg, os.Stderr)
 	if err != nil {
-		return fmt.Errorf("HTTP listen on %s: %w", cfg.addr, err)
+		return err
 	}
-
-	fmt.Fprintf(os.Stderr, "Starting Bitbucket MCP Server on http://%s/ (HTTP Streamable)\n", ln.Addr())
-	if cfg.remote {
-		fmt.Fprintln(os.Stderr, "\nWARNING: listening on a non-loopback address over cleartext HTTP (no TLS).")
-		fmt.Fprintln(os.Stderr, "WARNING: the bearer token and all Bitbucket data cross the network unencrypted.")
-		fmt.Fprintln(os.Stderr, "WARNING: put this server behind a TLS-terminating reverse proxy.")
-		fmt.Fprintln(os.Stderr)
-	}
-	if cfg.generated {
-		fmt.Fprintf(os.Stderr, "\nGenerated a random bearer token for this run (%s is unset):\n\n  %s\n\n", httpTokenEnv, cfg.token)
-		fmt.Fprintln(os.Stderr, "Clients must send:  Authorization: Bearer <token>")
-		fmt.Fprintf(os.Stderr, "Set %s to keep a stable token across restarts.\n\n", httpTokenEnv)
-	}
-
-	srv := &http.Server{
-		Handler:           newHTTPHandler(s, cfg.token),
-		ReadHeaderTimeout: 3 * time.Second,
-	}
-	if err := srv.Serve(ln); err != nil {
+	if err := newHTTPServer(s, cfg).Serve(ln); err != nil {
 		return fmt.Errorf("HTTP server error: %w", err)
 	}
 	return nil

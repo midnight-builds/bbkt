@@ -1,7 +1,10 @@
 package cli
 
 import (
+	"bytes"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -24,7 +27,12 @@ func newTestHTTPServer(t *testing.T) *httptest.Server {
 
 func postInitialize(t *testing.T, ts *httptest.Server, authz, hostHeader string) (status int, body string) {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPost, ts.URL, strings.NewReader(initializeBody))
+	return postInitializeTo(t, ts.Client(), ts.URL, authz, hostHeader)
+}
+
+func postInitializeTo(t *testing.T, client *http.Client, url, authz, hostHeader string) (status int, body string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(initializeBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +44,7 @@ func postInitialize(t *testing.T, ts *httptest.Server, authz, hostHeader string)
 	if hostHeader != "" {
 		req.Host = hostHeader
 	}
-	resp, err := ts.Client().Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,6 +224,102 @@ func TestIsLoopbackHost(t *testing.T) {
 	} {
 		if got := isLoopbackHost(h); got != want {
 			t.Errorf("isLoopbackHost(%q) = %v, want %v", h, got, want)
+		}
+	}
+}
+
+func TestHTTPHandlerSendsBearerChallenge(t *testing.T) {
+	ts := newTestHTTPServer(t)
+	for name, authz := range map[string]string{"missing": "", "wrong": "Bearer wrong-token-0123456789abcdef"} {
+		t.Run(name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodPost, ts.URL, strings.NewReader(initializeBody))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if authz != "" {
+				req.Header.Set("Authorization", authz)
+			}
+			resp, err := ts.Client().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", resp.StatusCode)
+			}
+			if got := resp.Header.Get("WWW-Authenticate"); !strings.HasPrefix(got, "Bearer") {
+				t.Fatalf("WWW-Authenticate = %q, want Bearer challenge", got)
+			}
+		})
+	}
+}
+
+// TestServeHTTPWiring exercises the listener and server that serveHTTP
+// composes: it must bind loopback, print the banner to the given writer, and
+// serve the token-gated handler rather than the bare MCP handler.
+func TestServeHTTPWiring(t *testing.T) {
+	cfg := &httpConfig{addr: "127.0.0.1:0", token: testHTTPToken, generated: true}
+	var banner bytes.Buffer
+	ln, err := listenHTTP(cfg, &banner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isLoopbackAddr(ln.Addr()) {
+		t.Fatalf("listening on %s, want loopback", ln.Addr())
+	}
+	if !strings.Contains(banner.String(), ln.Addr().String()) || !strings.Contains(banner.String(), testHTTPToken) {
+		t.Fatalf("banner missing address or generated token: %q", banner.String())
+	}
+
+	s := mcp.NewServer(&mcp.Implementation{Name: "bbkt-test", Version: "0"}, nil)
+	srv := newHTTPServer(s, cfg)
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ln) }()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		if err := <-done; !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("Serve returned %v", err)
+		}
+	})
+
+	url := "http://" + ln.Addr().String()
+	if status, body := postInitializeTo(t, http.DefaultClient, url, "", ""); status != http.StatusUnauthorized {
+		t.Fatalf("no token: status = %d, want 401 (body %q)", status, body)
+	}
+	status, body := postInitializeTo(t, http.DefaultClient, url, "Bearer "+testHTTPToken, "")
+	if status != http.StatusOK || !strings.Contains(body, `"serverInfo"`) {
+		t.Fatalf("correct token: status = %d body %q, want initialize success", status, body)
+	}
+}
+
+// TestListenHTTPRefusesNonLoopbackWhenLocal guards against a "loopback" host
+// (for example a tampered localhost entry) resolving to a non-loopback
+// address and skipping the --allow-remote gate.
+func TestListenHTTPRefusesNonLoopbackWhenLocal(t *testing.T) {
+	var banner bytes.Buffer
+	ln, err := listenHTTP(&httpConfig{addr: "0.0.0.0:0", token: testHTTPToken}, &banner)
+	if err == nil {
+		_ = ln.Close()
+		t.Fatal("non-loopback bind accepted for a config marked loopback")
+	}
+	if !strings.Contains(err.Error(), "non-loopback") {
+		t.Fatalf("err = %v, want non-loopback refusal", err)
+	}
+	if banner.Len() != 0 {
+		t.Fatalf("banner printed for a refused bind: %q", banner.String())
+	}
+}
+
+func TestIsLoopbackAddr(t *testing.T) {
+	for a, want := range map[net.Addr]bool{
+		&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)}: true,
+		&net.TCPAddr{IP: net.IPv6loopback}:       true,
+		&net.TCPAddr{IP: net.IPv4zero}:           false,
+		&net.TCPAddr{IP: net.IPv4(10, 0, 0, 5)}:  false,
+		&net.UnixAddr{Name: "/tmp/x"}:            false,
+	} {
+		if got := isLoopbackAddr(a); got != want {
+			t.Errorf("isLoopbackAddr(%v) = %v, want %v", a, got, want)
 		}
 	}
 }
