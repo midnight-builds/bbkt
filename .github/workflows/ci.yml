@@ -61,8 +61,23 @@ jobs:
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
 
-      - name: Run govulncheck
+      - name: Run govulncheck (source)
         run: govulncheck ./...
+
+      - name: Run govulncheck (release binaries)
+        # Mirror the release gate: binary mode on stripped builds is stricter
+        # than source mode and catches platform-specific modules (e.g. x/sys
+        # on windows) before a tag push would fail the release.
+        run: |
+          mkdir -p vulnbin
+          for platform in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            goos="${platform%/*}"; goarch="${platform#*/}"
+            out="vulnbin/bbkt-${goos}-${goarch}"
+            CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch go build -ldflags="-s -w" -o "$out" ./cmd/bbkt
+            echo "::group::$out"
+            govulncheck -mode=binary "$out"
+            echo "::endgroup::"
+          done
 
   build:
     name: Build
