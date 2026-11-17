@@ -67,7 +67,7 @@ if [ "$fail" -ne 0 ]; then
 fi
 
 echo "preflight clean (${#cmds[@]} commands)"
-[ -z "${BBKT_DEMO_PREFLIGHT_ONLY:-}" ] || exit 0
+if [ -n "${BBKT_DEMO_PREFLIGHT_ONLY:-}" ]; then cat "$out"; exit 0; fi
 command -v vhs >/dev/null || { echo "vhs not installed (brew install vhs)" >&2; exit 1; }
 echo "recording..."
 vhs "$tape"
