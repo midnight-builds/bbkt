@@ -119,18 +119,59 @@ func runOAuthLogin(profile string) error {
 	return nil
 }
 
+// statusSource describes which credential source is in effect.
+type statusSource struct {
+	Kind        string // "env-token", "env-basic", "stored", "none"
+	Fingerprint string // last 4 of the env token, when applicable
+	Shadowed    bool   // a stored profile exists but env vars take precedence
+}
+
+// selectStatusSource mirrors the precedence used by getClient and the MCP
+// server: BITBUCKET_ACCESS_TOKEN, then BITBUCKET_USERNAME + BITBUCKET_API_TOKEN,
+// then the stored profile.
+func selectStatusSource(getenv func(string) string, haveStored bool) statusSource {
+	token := getenv("BITBUCKET_ACCESS_TOKEN")
+	user := getenv("BITBUCKET_USERNAME")
+	pass := getenv("BITBUCKET_API_TOKEN")
+	switch {
+	case token != "":
+		return statusSource{Kind: "env-token", Fingerprint: tokenTail(token), Shadowed: haveStored}
+	case user != "" && pass != "":
+		return statusSource{Kind: "env-basic", Fingerprint: tokenTail(pass), Shadowed: haveStored}
+	case haveStored:
+		return statusSource{Kind: "stored"}
+	}
+	return statusSource{Kind: "none"}
+}
+
+func tokenTail(t string) string {
+	if len(t) <= 8 {
+		return "****"
+	}
+	return "..." + t[len(t)-4:]
+}
+
 func runStatus() {
 	creds, err := bitbucket.LoadCredentials()
-	if err != nil {
-		if os.Getenv("BITBUCKET_ACCESS_TOKEN") != "" {
-			fmt.Println("Authenticated via BITBUCKET_ACCESS_TOKEN environment variable")
-			return
-		}
-		if os.Getenv("BITBUCKET_USERNAME") != "" && os.Getenv("BITBUCKET_API_TOKEN") != "" {
-			fmt.Println("Authenticated via BITBUCKET_USERNAME + BITBUCKET_API_TOKEN environment variables")
-			return
-		}
+	src := selectStatusSource(os.Getenv, err == nil)
+
+	switch src.Kind {
+	case "env-token":
+		fmt.Println("Authenticated via BITBUCKET_ACCESS_TOKEN environment variable")
+		fmt.Printf("  Token:   %s\n", src.Fingerprint)
+	case "env-basic":
+		fmt.Println("Authenticated via BITBUCKET_USERNAME + BITBUCKET_API_TOKEN environment variables")
+		fmt.Printf("  User:    %s\n", os.Getenv("BITBUCKET_USERNAME"))
+		fmt.Printf("  Token:   %s\n", src.Fingerprint)
+	case "none":
 		fmt.Println("Not authenticated. Run: bbkt auth")
+		return
+	}
+	if src.Shadowed {
+		fmt.Println("  Note:    a stored profile exists but is shadowed by the environment variables above")
+		return
+	}
+	if src.Kind != "stored" {
 		return
 	}
 
@@ -141,11 +182,7 @@ func runStatus() {
 		fmt.Println("Authenticated via API Token (Basic Auth)")
 		fmt.Printf("  Profile: %s\n", creds.ProfileName)
 		fmt.Printf("  Email:   %s\n", creds.Email)
-		if len(creds.APIToken) > 8 {
-			fmt.Printf("  Token:   %s...%s\n", creds.APIToken[:4], creds.APIToken[len(creds.APIToken)-4:])
-		} else {
-			fmt.Println("  Token:   ****")
-		}
+		fmt.Printf("  Token:   %s\n", tokenTail(creds.APIToken))
 		if creds.Scopes != "" {
 			fmt.Printf("  Scopes:  %s\n", creds.Scopes)
 		}

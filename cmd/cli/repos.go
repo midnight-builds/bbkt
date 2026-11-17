@@ -1,7 +1,12 @@
 package cli
 
 import (
+	"bufio"
+	"errors"
 	"fmt"
+	"io"
+	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/zach-snell/bbkt/internal/bitbucket"
@@ -18,7 +23,8 @@ inferred from .git/config.`,
   bbkt repos list my-team               # repos in a specific workspace
   bbkt repos get my-team my-repo
   bbkt repos create my-team new-repo --description "..."
-  bbkt repos delete my-team old-repo`,
+  bbkt repos delete my-team/old-repo
+  bbkt repos delete my-team old-repo --yes`,
 }
 
 var reposListCmd = &cobra.Command{
@@ -163,12 +169,27 @@ var reposCreateCmd = &cobra.Command{
 }
 
 var reposDeleteCmd = &cobra.Command{
-	Use:   "delete [workspace] [repo-slug]",
-	Short: "Delete a repository (destructive — no confirmation)",
-	Args:  cobra.MaximumNArgs(2),
+	Use:   "delete <workspace> <repo-slug> | <workspace/repo-slug>",
+	Short: "Permanently delete a repository (requires explicit target and confirmation)",
+	Long: `Permanently delete a repository. This cannot be undone.
+
+The target must be given explicitly on the command line, either as two
+positionals ("workspace repo-slug") or one ("workspace/repo-slug"). It is never
+inferred from the current git clone or from BBKT_WORKSPACE / BBKT_REPO.
+
+Unless --yes is passed, you are prompted to type the full "workspace/repo-slug"
+to confirm. Without a terminal on stdin, or with --json, --yes is required.`,
+	Example: `  bbkt repos delete my-team old-repo
+  bbkt repos delete my-team/old-repo --yes`,
+	Args: cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		workspace, repoSlug, _, err := ParseArgs(cmd, args, 0)
+		workspace, repoSlug, err := resolveDeleteTarget(args)
 		if err != nil {
+			return err
+		}
+
+		yes, _ := cmd.Flags().GetBool("yes")
+		if err := confirmRepoDelete(workspace+"/"+repoSlug, yes, outputJSON(cmd), stdinIsTerminal(), os.Stdin, cmd.ErrOrStderr()); err != nil {
 			return err
 		}
 
@@ -191,6 +212,53 @@ var reposDeleteCmd = &cobra.Command{
 	},
 }
 
+// resolveDeleteTarget requires an explicit workspace and repo slug from the
+// positional args and deliberately performs no inference from git remotes or
+// environment variables.
+func resolveDeleteTarget(args []string) (workspace, repoSlug string, err error) {
+	switch len(args) {
+	case 1:
+		parts := strings.Split(args[0], "/")
+		if len(parts) != 2 {
+			return "", "", errors.New("repos delete requires an explicit target: <workspace> <repo-slug> or <workspace/repo-slug>")
+		}
+		workspace, repoSlug = parts[0], parts[1]
+	case 2:
+		workspace, repoSlug = args[0], args[1]
+	default:
+		return "", "", errors.New("repos delete requires an explicit target: <workspace> <repo-slug> or <workspace/repo-slug>")
+	}
+	workspace, repoSlug = strings.TrimSpace(workspace), strings.TrimSpace(repoSlug)
+	if workspace == "" || repoSlug == "" || strings.Contains(workspace, "/") || strings.Contains(repoSlug, "/") {
+		return "", "", errors.New("repos delete requires a non-empty workspace and repo-slug")
+	}
+	return workspace, repoSlug, nil
+}
+
+// confirmRepoDelete decides whether a deletion may proceed. With yes it always
+// does. Otherwise it needs an interactive terminal (and no --json) and the
+// user to type the full "workspace/slug" target.
+func confirmRepoDelete(target string, yes, jsonOut, isTTY bool, in io.Reader, out io.Writer) error {
+	if yes {
+		return nil
+	}
+	if jsonOut || !isTTY {
+		return fmt.Errorf("refusing to delete %s without confirmation: pass --yes to confirm (required when stdin is not a terminal or --json is set)", target)
+	}
+	fmt.Fprintf(out, "This will permanently delete repository %s. Type the full name to confirm: ", target)
+	line, _ := bufio.NewReader(in).ReadString('\n')
+	if strings.TrimSpace(line) != target {
+		return errors.New("confirmation did not match; aborted")
+	}
+	return nil
+}
+
+// stdinIsTerminal reports whether stdin is an interactive character device.
+func stdinIsTerminal() bool {
+	fi, err := os.Stdin.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
 func init() {
 	RootCmd.AddCommand(reposCmd)
 	reposCmd.AddCommand(reposListCmd)
@@ -206,5 +274,6 @@ func init() {
 	reposCreateCmd.Flags().String("description", "", "Repository description")
 	reposCreateCmd.Flags().String("language", "", "Primary programming language")
 	reposCreateCmd.Flags().String("project", "", "Project key to assign the repo to")
+	reposDeleteCmd.Flags().Bool("yes", false, "Skip the confirmation prompt (required when non-interactive or with --json)")
 	reposCreateCmd.Flags().Bool("private", true, "Create as a private repository")
 }
