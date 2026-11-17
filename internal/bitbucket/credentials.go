@@ -5,10 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/charmbracelet/x/term"
 )
 
 // AuthType distinguishes between credential storage methods.
@@ -84,20 +90,9 @@ func SaveProfileStore(store *ProfileStore) error {
 		return err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("creating config dir: %w", err)
-	}
-
-	data, err := json.MarshalIndent(store, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshaling profile store: %w", err)
-	}
-
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("writing credentials file: %w", err)
-	}
-
-	return nil
+	return withCredentialsLock(path, func() error {
+		return writeProfileStore(path, store)
+	})
 }
 
 // SaveProfile saves a single credential under its ProfileName.
@@ -106,25 +101,38 @@ func SaveProfile(creds *Credentials) error {
 	if creds.ProfileName == "" {
 		creds.ProfileName = "default"
 	}
-
-	store, err := LoadProfileStore()
-	if err != nil {
-		// If the file doesn't exist, we start a fresh store
-		store = &ProfileStore{
-			Profiles: make(map[string]*Credentials),
+	return UpdateProfileStore(func(store *ProfileStore) error {
+		store.Profiles[creds.ProfileName] = creds
+		if store.ActiveProfile == "" {
+			store.ActiveProfile = creds.ProfileName
 		}
-	}
+		return nil
+	})
+}
 
-	if store.Profiles == nil {
-		store.Profiles = make(map[string]*Credentials)
+// UpdateProfileStore performs a locked read-modify-write of the profile
+// store: it loads the current store (or an empty one if no credentials file
+// exists yet), applies fn, and writes the result back atomically. Any load
+// error other than "file does not exist" is returned without writing, so an
+// unreadable or corrupt file is never silently replaced.
+func UpdateProfileStore(fn func(*ProfileStore) error) error {
+	path, err := CredentialsPath()
+	if err != nil {
+		return err
 	}
-
-	store.Profiles[creds.ProfileName] = creds
-	if store.ActiveProfile == "" {
-		store.ActiveProfile = creds.ProfileName
-	}
-
-	return SaveProfileStore(store)
+	return withCredentialsLock(path, func() error {
+		store, _, err := readProfileStore(path)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			store = &ProfileStore{Profiles: make(map[string]*Credentials)}
+		case err != nil:
+			return fmt.Errorf("refusing to overwrite existing credentials: %w", err)
+		}
+		if err := fn(store); err != nil {
+			return err
+		}
+		return writeProfileStore(path, store)
+	})
 }
 
 // LoadProfileStore reads the persisted profile store from disk.
@@ -135,59 +143,209 @@ func LoadProfileStore() (*ProfileStore, error) {
 		return nil, err
 	}
 
-	data, err := os.ReadFile(path)
+	store, legacy, err := readProfileStore(path)
 	if err != nil {
-		return nil, fmt.Errorf("reading credentials file: %w", err)
+		return nil, err
 	}
+
+	if legacy {
+		// Save the migrated format silently back to disk. Re-read under the
+		// lock so a concurrent writer's newer contents are never clobbered.
+		_ = withCredentialsLock(path, func() error {
+			cur, stillLegacy, err := readProfileStore(path)
+			if err != nil {
+				return err
+			}
+			if !stillLegacy {
+				store = cur
+				return nil
+			}
+			return writeProfileStore(path, cur)
+		})
+	}
+
+	return store, nil
+}
+
+// readProfileStore reads and parses the credentials file without taking the
+// lock. legacy reports whether the file was in the old single-credential
+// format (the returned store is already migrated in memory).
+func readProfileStore(path string) (store *ProfileStore, legacy bool, err error) {
+	data, err := os.ReadFile(path) // #nosec G304 -- path is the fixed bbkt credentials location
+	if err != nil {
+		return nil, false, fmt.Errorf("reading credentials file: %w", err)
+	}
+	warnLoosePermissions(path)
 
 	// Check if this is the old scalar Credentials format or the new ProfileStore format
 	var check map[string]interface{}
 	if err := json.Unmarshal(data, &check); err != nil {
-		return nil, fmt.Errorf("parsing credentials file: %w", err)
+		return nil, false, fmt.Errorf("parsing credentials file: %w", err)
 	}
 
 	if _, ok := check["profiles"]; !ok {
 		// Old format migration
 		var oldCreds Credentials
 		if err := json.Unmarshal(data, &oldCreds); err != nil {
-			return nil, fmt.Errorf("parsing legacy credentials: %w", err)
+			return nil, false, fmt.Errorf("parsing legacy credentials: %w", err)
 		}
 		oldCreds.ProfileName = "default"
 
-		store := &ProfileStore{
+		return &ProfileStore{
 			ActiveProfile: "default",
 			Profiles: map[string]*Credentials{
 				"default": &oldCreds,
 			},
-		}
-
-		// Save the migrated format silently back to disk
-		_ = SaveProfileStore(store)
-		return store, nil
+		}, true, nil
 	}
 
 	// New format
-	var store ProfileStore
-	if err := json.Unmarshal(data, &store); err != nil {
-		return nil, fmt.Errorf("parsing profile store: %w", err)
+	var s ProfileStore
+	if err := json.Unmarshal(data, &s); err != nil {
+		return nil, false, fmt.Errorf("parsing profile store: %w", err)
 	}
 
-	if store.Profiles == nil {
-		store.Profiles = make(map[string]*Credentials)
+	if s.Profiles == nil {
+		s.Profiles = make(map[string]*Credentials)
 	}
 
-	for name, creds := range store.Profiles {
+	for name, creds := range s.Profiles {
 		creds.ProfileName = name
 	}
 
-	return &store, nil
+	return &s, false, nil
+}
+
+// writeProfileStore atomically replaces the credentials file with store.
+// The caller must hold the credentials lock. The data is written to a temp
+// file in the same directory, fsynced and renamed into place, so readers
+// never observe a partially written file. Afterwards the file is forced to
+// 0600 and its directory to 0700, since create-time modes do not tighten an
+// existing file. A symlinked credentials file is refused rather than followed.
+func writeProfileStore(path string, store *ProfileStore) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("creating config dir: %w", err)
+	}
+
+	if fi, err := os.Lstat(path); err == nil {
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to write credentials: %s is a symlink; replace it with a regular file", path)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("checking credentials file: %w", err)
+	}
+
+	data, err := json.MarshalIndent(store, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling profile store: %w", err)
+	}
+
+	tmp, err := os.CreateTemp(dir, ".credentials-*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating temp credentials file: %w", err)
+	}
+	tmpName := tmp.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tmp.Close()
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if err := tmp.Chmod(0o600); err != nil {
+		return fmt.Errorf("setting temp credentials file mode: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return fmt.Errorf("writing credentials file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fmt.Errorf("syncing credentials file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing credentials file: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("replacing credentials file: %w", err)
+	}
+	committed = true
+
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("setting credentials file mode: %w", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("setting config dir mode: %w", err)
+	}
+	syncDir(dir)
+	return nil
+}
+
+// syncDir best-effort fsyncs a directory so a rename into it is durable.
+// Directories cannot be opened for sync on Windows, so it is skipped there.
+func syncDir(dir string) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	d, err := os.Open(dir) // #nosec G304 -- dir is the bbkt config directory
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	_ = d.Close()
+}
+
+// withCredentialsLock runs fn while holding an exclusive advisory lock on a
+// sibling lock file, serializing credential writers across goroutines and
+// processes (e.g. several MCP servers refreshing OAuth tokens at once).
+func withCredentialsLock(path string, fn func() error) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("creating config dir: %w", err)
+	}
+	lf, err := os.OpenFile(path+".lock", os.O_RDWR|os.O_CREATE, 0o600) // #nosec G304 -- fixed sibling of the credentials file
+	if err != nil {
+		return fmt.Errorf("opening credentials lock: %w", err)
+	}
+	defer func() { _ = lf.Close() }()
+
+	if err := lockFile(lf); err != nil {
+		return fmt.Errorf("locking credentials file: %w", err)
+	}
+	defer func() { _ = unlockFile(lf) }()
+
+	return fn()
+}
+
+// stderrOut is where credential-file warnings are printed; tests override it.
+var stderrOut io.Writer = os.Stderr
+
+// warnedPaths records credential files already warned about, so a long-lived
+// MCP server does not repeat the warning on every load.
+var warnedPaths sync.Map
+
+// warnLoosePermissions prints a one-line warning if the credentials file is
+// readable or writable by group/others. Windows has no POSIX modes, so it is
+// skipped there.
+func warnLoosePermissions(path string) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	fi, err := os.Stat(path)
+	if err != nil || fi.Mode().Perm()&0o077 == 0 {
+		return
+	}
+	if _, already := warnedPaths.LoadOrStore(path, true); already {
+		return
+	}
+	_, _ = fmt.Fprintf(stderrOut, "warning: %s has mode %#o and contains secrets; run: chmod 600 %s\n", path, fi.Mode().Perm(), path)
 }
 
 // LoadCredentials gets the active credential profile based on context.
 // Priority:
-// 1. BBKT_PROFILE environment variable (or --profile CLI flag equivalent)
-// 2. Exact match of local `git config user.email` to a profile's email
-// 3. The configured 'ActiveProfile' in credentials.json
+//  1. BBKT_PROFILE environment variable (or --profile CLI flag equivalent)
+//  2. A profile whose AccessibleWorkspaces contains the workspace of the
+//     current directory's Bitbucket git remote
+//  3. The configured 'ActiveProfile' in credentials.json
 func LoadCredentials() (*Credentials, error) {
 	store, err := LoadProfileStore()
 	if err != nil {
@@ -235,11 +393,12 @@ func RemoveCredentials() error {
 		return err
 	}
 
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-
-	return nil
+	return withCredentialsLock(path, func() error {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	})
 }
 
 // APITokenLogin prompts the user for email + API Token and stores them.
@@ -266,7 +425,7 @@ func APITokenLogin(profileName string) error {
 	fmt.Println()
 	fmt.Println("Tools are dynamically disabled if your token omits specific scopes.")
 	fmt.Println("To explicitly deny the MCP server access to tools despite having full scopes, use:")
-	fmt.Println("  export BITBUCKET_DISABLED_TOOLS=\"delete_repository,delete_branch...\"")
+	fmt.Println("  export BITBUCKET_DISABLED_TOOLS=\"manage_repositories,manage_refs\"")
 	fmt.Println()
 
 	fmt.Print("Atlassian email: ")
@@ -280,7 +439,7 @@ func APITokenLogin(profileName string) error {
 	}
 
 	fmt.Print("API Token: ")
-	token, err := reader.ReadString('\n')
+	token, err := readSecretLine(reader, os.Stdin)
 	if err != nil {
 		return fmt.Errorf("reading API Token: %w", err)
 	}
@@ -339,6 +498,22 @@ func APITokenLogin(profileName string) error {
 	fmt.Printf("\nCredentials saved to: %s\n", path)
 	fmt.Println("You can now use the Bitbucket MCP server.")
 	return nil
+}
+
+// readSecretLine reads one line of secret input. When in is a terminal (and
+// nothing is already buffered from it) the input is read with echo disabled;
+// otherwise, e.g. for pipes in scripts and tests, it is read as a plain line
+// from reader.
+func readSecretLine(reader *bufio.Reader, in *os.File) (string, error) {
+	if reader.Buffered() == 0 && term.IsTerminal(in.Fd()) {
+		b, err := term.ReadPassword(in.Fd())
+		fmt.Println()
+		if err != nil {
+			return "", err
+		}
+		return string(b), nil
+	}
+	return reader.ReadString('\n')
 }
 
 // FetchAccessibleWorkspaces retrieves all workspace slugs the client can access.
