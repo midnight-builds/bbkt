@@ -310,7 +310,7 @@ func registerTools(s *mcp.Server, c *bitbucket.Client) error {
 	}
 	if err != nil {
 		if !skipScopeCheck() {
-			return fmt.Errorf("failed to introspect token scopes: %w\n\n%s", err, skipScopeCheckHint)
+			return fmt.Errorf("failed to introspect token scopes (set BBKT_SKIP_SCOPE_CHECK=1 to bypass): %w\n\n%s", err, skipScopeCheckHint)
 		}
 		fmt.Fprintf(os.Stderr, "Warning: failed to fetch token scopes for introspection; BBKT_SKIP_SCOPE_CHECK is set, so scope filtering is disabled: %v\n", err)
 		tokenScopes = nil // empty scopes make hasRequiredScope allow every tool

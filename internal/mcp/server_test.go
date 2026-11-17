@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/zach-snell/bbkt/internal/bitbucket"
@@ -53,6 +54,19 @@ func (f *fakeAPI) client() *bitbucket.Client {
 	c := bitbucket.NewClient("", "", "test-token")
 	c.SetBaseURLForTesting(f.srv.URL)
 	return c
+}
+
+// recvPath returns the next request the fake API saw, failing the test if
+// none arrives in time.
+func recvPath(t *testing.T, f *fakeAPI) string {
+	t.Helper()
+	select {
+	case p := <-f.paths:
+		return p
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for a request to reach the fake API")
+		return ""
+	}
 }
 
 // clearPolicyEnv makes each test independent of the developer's environment.
@@ -210,6 +224,57 @@ func TestNewServer_ScopeIntrospectionFailureFailsClosed(t *testing.T) {
 	}
 }
 
+// TestNewServer_EmptyScopeListFailsClosed covers introspection that succeeds
+// but yields no scopes (a header of only separators, or cached OAuth scopes
+// that parse to nothing). hasRequiredScope would allow every tool for an empty
+// list, so construction must fail unless the scope check is skipped.
+func TestNewServer_EmptyScopeListFailsClosed(t *testing.T) {
+	headerClient := func(t *testing.T) *bitbucket.Client { return newFakeAPI(t, ",").client() }
+	oauthClient := func(t *testing.T) *bitbucket.Client {
+		c := bitbucket.NewClientFromCredentials(&bitbucket.Credentials{
+			AuthType:    bitbucket.AuthTypeOAuth,
+			AccessToken: "test-token",
+			Scopes:      " , ",
+		})
+		c.SetBaseURLForTesting(newFakeAPI(t, fullScopes).srv.URL)
+		return c
+	}
+	for name, mk := range map[string]func(*testing.T) *bitbucket.Client{
+		"separator-only header": headerClient,
+		"empty cached oauth":    oauthClient,
+	} {
+		t.Run(name, func(t *testing.T) {
+			clearPolicyEnv(t)
+			if _, err := newServer(mk(t)); err == nil {
+				t.Fatal("newServer succeeded with an empty scope list, want error")
+			} else if !strings.Contains(err.Error(), "BBKT_SKIP_SCOPE_CHECK") {
+				t.Errorf("error %q lacks the BBKT_SKIP_SCOPE_CHECK hint", err)
+			}
+
+			t.Setenv("BBKT_SKIP_SCOPE_CHECK", "1")
+			s, err := newServer(mk(t))
+			if err != nil {
+				t.Fatalf("newServer with BBKT_SKIP_SCOPE_CHECK=1: %v", err)
+			}
+			if got, want := listToolNames(t, s), sorted(toolNames()); !slices.Equal(got, want) {
+				t.Fatalf("tools = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// TestDisabledToolsExample_IsValid keeps the onboarding example in sync with
+// the registered tool names.
+func TestDisabledToolsExample_IsValid(t *testing.T) {
+	got, err := parseDisabledTools(bitbucket.DisabledToolsExample)
+	if err != nil {
+		t.Fatalf("onboarding example %q is rejected: %v", bitbucket.DisabledToolsExample, err)
+	}
+	if len(got) == 0 {
+		t.Fatalf("onboarding example %q names no tools", bitbucket.DisabledToolsExample)
+	}
+}
+
 func TestNewServer_SkipScopeCheckRegistersAllTools(t *testing.T) {
 	for _, v := range []string{"1", "true", "YES", "on"} {
 		t.Run(v, func(t *testing.T) {
@@ -288,7 +353,7 @@ func TestBitbucketAPI_ReadReachesServer(t *testing.T) {
 		t.Fatalf("newServer: %v", err)
 	}
 	cs := connect(t, s)
-	<-api.paths // drain the /user introspection call
+	recvPath(t, api) // drain the /user introspection call
 
 	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "bitbucket_api",
@@ -300,7 +365,7 @@ func TestBitbucketAPI_ReadReachesServer(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("GET via bitbucket_api failed: %s", resultText(res))
 	}
-	if got := <-api.paths; got != "GET /repositories/ws/repo" {
+	if got := recvPath(t, api); got != "GET /repositories/ws/repo" {
 		t.Errorf("server saw %q, want GET /repositories/ws/repo", got)
 	}
 }

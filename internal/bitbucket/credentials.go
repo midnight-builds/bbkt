@@ -19,6 +19,11 @@ const (
 	AuthTypeOAuth    AuthType = "oauth"
 )
 
+// DisabledToolsExample is the BITBUCKET_DISABLED_TOOLS value shown during
+// onboarding. Every entry must be a registered MCP tool name, or the server
+// refuses to start; internal/mcp tests enforce this.
+const DisabledToolsExample = "manage_repositories,manage_pipelines"
+
 // ProfileStore holds multiple authentication profiles
 type ProfileStore struct {
 	ActiveProfile string                  `json:"active_profile"`
@@ -266,7 +271,7 @@ func APITokenLogin(profileName string) error {
 	fmt.Println()
 	fmt.Println("Tools are dynamically disabled if your token omits specific scopes.")
 	fmt.Println("To explicitly deny the MCP server access to tools despite having full scopes, use:")
-	fmt.Println("  export BITBUCKET_DISABLED_TOOLS=\"delete_repository,delete_branch...\"")
+	fmt.Printf("  export BITBUCKET_DISABLED_TOOLS=%q\n", DisabledToolsExample)
 	fmt.Println()
 
 	fmt.Print("Atlassian email: ")
