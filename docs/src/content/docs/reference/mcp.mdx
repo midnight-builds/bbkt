@@ -3,23 +3,48 @@ title: MCP Tools Reference
 description: Complete reference for all bbkt Model Context Protocol tools.
 ---
 
-The `bbkt` MCP server exposes 9 core, multiplexed tools. Every tool relies on an `action` enum property to select discrete API operations.
+The `bbkt` MCP server exposes 9 core, multiplexed tools plus the `bitbucket_api` passthrough. Every multiplexed tool relies on an `action` enum property to select discrete API operations.
 
 ## Transports
 
 `bbkt mcp` supports two transports:
 
 - **Stdio (default)** — `bbkt mcp`. Use for local MCP clients (Claude Desktop, Cursor, Zed).
-- **HTTP Streamable** — `bbkt mcp --port <n>`. Use for remote/network clients (SSE-based).
+- **HTTP Streamable** — `bbkt mcp --port <n>`. SSE-based; for clients that cannot spawn a process.
+
+### HTTP transport
+
+- **Loopback by default.** The server binds `127.0.0.1:<port>`. Change the address with `--host`. Binding a non-loopback address (e.g. `--host 0.0.0.0`) is refused unless you also pass `--allow-remote` **and** set `BBKT_MCP_HTTP_TOKEN`.
+- **Bearer token always required.** Every request must send `Authorization: Bearer <token>`; anything else gets `401`. The token comes from `BBKT_MCP_HTTP_TOKEN` (at least 16 characters). On loopback, if it is unset, bbkt generates a random 32-byte token and prints it once to stderr at startup.
+- **Cleartext.** The transport is plain HTTP with no TLS. A remote bind prints a warning; put anything beyond loopback behind a TLS-terminating reverse proxy.
+- The MCP SDK's DNS-rebinding and cross-origin protections stay enabled, and idle sessions close after 30 minutes.
+
+```bash
+# Local: token is generated and printed to stderr
+bbkt mcp --port 8080
+
+# Stable token
+export BBKT_MCP_HTTP_TOKEN="$(openssl rand -hex 32)"
+bbkt mcp --port 8080
+
+# Remote (cleartext, so terminate TLS in front of it)
+bbkt mcp --port 8080 --host 0.0.0.0 --allow-remote
+```
 
 ## Security & Introspection
 
-**Token introspection:** At startup the server calls Bitbucket's `/user` endpoint and reads the `X-OAuth-Scopes` response header to discover the granted scopes of the credential in use (scoped Atlassian API token or OAuth bearer). Tools whose required scope is missing are **silently dropped** before the MCP catalog is published, so the AI agent never sees write tools it would fail to call.
+**Token introspection:** At startup the server calls Bitbucket's `/user` endpoint and reads the `X-OAuth-Scopes` response header to discover the granted scopes of the credential in use. A tool is dropped only when the credential lacks that tool's **read** scope (`repository`, `pullrequest`, `pipeline`, `issue`).
 
-**Explicit denial:** You can forcefully deny the LLM access to any individual tool (e.g., `manage_repositories`) via the `BITBUCKET_DISABLED_TOOLS` environment variable (comma-separated).
+:::caution[Scope filtering is not a write guard]
+A read-only credential still exposes the write actions inside the multiplexed `manage_*` tools (`create`, `delete`, `merge`, `write_file`, `trigger`, ...). Those calls fail at the Bitbucket API rather than being hidden. What the agent can actually change is decided by the credential, so give agents **least-privilege credentials**, ideally a Bitbucket [repository or workspace access token](https://support.atlassian.com/bitbucket-cloud/docs/access-tokens/) limited to the repos and scopes they need, passed via `BITBUCKET_ACCESS_TOKEN`.
+:::
+
+If scope introspection fails at startup, the server refuses to start. Set `BBKT_SKIP_SCOPE_CHECK=1` to start anyway; with no scope list to filter on, every tool is registered. This may be needed for repository and workspace access tokens, which are not tied to a user; Bitbucket still enforces the token's own permissions.
+
+**Explicit denial:** `BITBUCKET_DISABLED_TOOLS` (comma-separated) removes tools outright, regardless of scopes. Valid names are `manage_workspaces`, `manage_repositories`, `manage_refs`, `manage_commits`, `manage_pull_requests`, `manage_pr_comments`, `manage_source`, `manage_pipelines`, `manage_issues` and `bitbucket_api`. Unknown names are rejected at startup, so a typo cannot silently leave a tool enabled.
 
 ```bash
-export BITBUCKET_DISABLED_TOOLS="manage_repositories,manage_pipelines"
+export BITBUCKET_DISABLED_TOOLS="manage_repositories,manage_pipelines,bitbucket_api"
 ```
 
 ## Multiplexed Tools
@@ -73,3 +98,11 @@ Trigger and monitor standard Bitbucket pipelines integration tests and deploymen
 Interact with the repository Issue Tracker.
 - **Actions:** `list`, `get`, `create`, `update`
 - **Required scope:** `issue`
+
+## Passthrough
+
+### `bitbucket_api`
+Authenticated passthrough to any Bitbucket Cloud REST API v2 endpoint the typed tools don't cover (webhooks, branch restrictions, pipeline config, ...). Returns the raw HTTP status and JSON body.
+- **Params:** `path` (required), `method` (default `GET`), `body` (raw JSON), `paginate`, `max_pages` (default 10)
+- **Writes:** only `GET`/`HEAD` are allowed by default. `POST`/`PUT`/`PATCH`/`DELETE` are rejected unless the server runs with `BBKT_API_ALLOW_WRITE=1`. Enabling it lets the agent call any write endpoint the credential permits.
+- **Required scope:** none (always registered; disable it with `BITBUCKET_DISABLED_TOOLS=bitbucket_api`)

@@ -59,6 +59,31 @@ To select a non-default profile per client (e.g. a "work" config in one MCP host
 }
 ```
 
+### Least-privilege credentials for agents
+
+The MCP server only hides a tool when the credential lacks that tool's **read** scope. A read-only credential still exposes the write actions inside the multiplexed `manage_*` tools (they fail at the API instead), so the credential is the real boundary on what an agent can change. For agent setups, prefer a Bitbucket **repository or workspace access token** scoped to just the repos and permissions the agent needs, passed via `BITBUCKET_ACCESS_TOKEN`. Repository and workspace access tokens are not tied to a user; if introspection fails for one and startup is refused, set `BBKT_SKIP_SCOPE_CHECK=1`. Every tool is then registered, and Bitbucket still enforces the token's own permissions.
+
+Example:
+
+```json
+{
+  "mcpServers": {
+    "bitbucket": {
+      "command": "/absolute/path/to/bbkt",
+      "args": ["mcp"],
+      "env": {
+        "BITBUCKET_ACCESS_TOKEN": "<repository-access-token>",
+        "BITBUCKET_DISABLED_TOOLS": "manage_repositories,manage_pipelines"
+      }
+    }
+  }
+}
+```
+
+### HTTP transport
+
+`bbkt mcp --port <n>` binds `127.0.0.1` and requires `Authorization: Bearer <token>` on every request. Set the token with `BBKT_MCP_HTTP_TOKEN`; if it is unset on loopback, a random token is printed to stderr at startup. Binding another address needs `--host <addr> --allow-remote` plus `BBKT_MCP_HTTP_TOKEN`, and the transport is cleartext HTTP, so put it behind TLS. See the [MCP reference](/bbkt/reference/mcp#http-transport).
+
 ## Environment Variables
 
 Setting these bypasses the stored profile (useful for CI/CD and headless setups).
@@ -67,12 +92,15 @@ Setting these bypasses the stored profile (useful for CI/CD and headless setups)
 |---|---|
 | `BITBUCKET_USERNAME` | Atlassian email (despite the legacy name) — used with `BITBUCKET_API_TOKEN` |
 | `BITBUCKET_API_TOKEN` | Scoped Atlassian API token |
-| `BITBUCKET_ACCESS_TOKEN` | OAuth 2.0 bearer token (overrides stored profile) |
+| `BITBUCKET_ACCESS_TOKEN` | Bearer token: OAuth 2.0 access token or a repository/workspace access token (overrides stored profile) |
 | `BITBUCKET_OAUTH_CLIENT_ID` | OAuth consumer Key (only used by `bbkt auth --oauth`) |
 | `BITBUCKET_OAUTH_CLIENT_SECRET` | OAuth consumer Secret (only used by `bbkt auth --oauth`) |
 | `BBKT_PROFILE` | Profile name override (one-shot) |
 | `BBKT_OAUTH_CALLBACK_PORT` | Local callback port for OAuth flow (default `8976`) |
-| `BITBUCKET_DISABLED_TOOLS` | Comma-separated MCP tool names to disable |
+| `BITBUCKET_DISABLED_TOOLS` | Comma-separated MCP tools to remove: `manage_workspaces`, `manage_repositories`, `manage_refs`, `manage_commits`, `manage_pull_requests`, `manage_pr_comments`, `manage_source`, `manage_pipelines`, `manage_issues`, `bitbucket_api`. Unknown names are rejected at startup |
+| `BBKT_API_ALLOW_WRITE` | Set to `1` to allow write methods (`POST`/`PUT`/`PATCH`/`DELETE`) through the `bitbucket_api` MCP passthrough (default: reads only) |
+| `BBKT_SKIP_SCOPE_CHECK` | Set to `1` to start the MCP server even if scope introspection fails (otherwise startup is refused) |
+| `BBKT_MCP_HTTP_TOKEN` | Bearer token required by `bbkt mcp --port` (min. 16 characters; generated on loopback if unset) |
 
 ## Multi-Profile Selection
 

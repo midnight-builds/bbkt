@@ -32,8 +32,10 @@ func redactQuery(path string) string {
 
 // writePassthroughEnabled reports whether raw write methods are allowed through
 // the MCP passthrough. Off by default: the typed manage_* tools cover common
-// writes with their own guardrails, so unrestricted write passthrough would add
-// an unaudited foot-gun (e.g. DELETE /repositories/x/y) that bypasses them.
+// writes through a fixed, structured set of actions, whereas raw write
+// passthrough lets the model reach any endpoint (e.g. DELETE
+// /repositories/x/y). The typed tools are not otherwise gated; the only limit
+// on either path is what the credential itself is allowed to do.
 func writePassthroughEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("BBKT_API_ALLOW_WRITE"))) {
 	case "1", "true", "yes", "on":

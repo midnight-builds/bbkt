@@ -52,9 +52,19 @@ Start the MCP server. Stdio by default; pass `--port <n>` for the HTTP Streamabl
 
 ```bash
 bbkt mcp                           # stdio
-bbkt mcp --port 8080               # HTTP Streamable on :8080
+bbkt mcp --port 8080               # HTTP on 127.0.0.1:8080; bearer token printed to stderr
+BBKT_MCP_HTTP_TOKEN=<token> bbkt mcp --port 8080 --host 0.0.0.0 --allow-remote
 bbkt mcp --no-auth                 # no credentials (tools return auth-required)
 ```
+
+| Flag | Purpose |
+|---|---|
+| `--port <n>` | Serve the HTTP Streamable transport instead of stdio |
+| `--host <addr>` | Bind address for `--port` (default `127.0.0.1`) |
+| `--allow-remote` | Permit a non-loopback `--host`; also requires `BBKT_MCP_HTTP_TOKEN` |
+| `--no-auth` | Start without Bitbucket credentials |
+
+The HTTP transport always requires `Authorization: Bearer <token>`. The token is `BBKT_MCP_HTTP_TOKEN` (at least 16 characters) or, on loopback when unset, a random token printed once to stderr. It is cleartext HTTP; put remote binds behind TLS. See the [MCP reference](/bbkt/reference/mcp) for scope filtering, `BITBUCKET_DISABLED_TOOLS` and `bitbucket_api`.
 
 ## Core Commands
 
