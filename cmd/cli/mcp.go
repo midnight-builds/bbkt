@@ -63,7 +63,10 @@ func runServer() error {
 		token := os.Getenv("BITBUCKET_ACCESS_TOKEN")
 
 		if token != "" || (username != "" && password != "") {
-			s = mcpserver.New(username, password, token)
+			var err error
+			if s, err = mcpserver.New(username, password, token); err != nil {
+				return err
+			}
 		} else {
 			creds, err := bitbucket.LoadCredentials()
 			if err != nil {
@@ -79,7 +82,9 @@ func runServer() error {
 
 			switch {
 			case creds.IsAPIToken() || creds.IsOAuth():
-				s = mcpserver.NewFromCredentials(creds)
+				if s, err = mcpserver.NewFromCredentials(creds); err != nil {
+					return err
+				}
 			default:
 				return fmt.Errorf("unknown auth type in stored credentials: %s", creds.AuthType)
 			}

@@ -69,6 +69,14 @@ func NewClientFromCredentials(creds *Credentials) *Client {
 	return c
 }
 
+// SetBaseURLForTesting points the client at u (e.g. an httptest.Server URL)
+// instead of the Bitbucket Cloud API. It exists so other packages' tests can
+// exercise code that uses a Client without network access; production code
+// must not call it.
+func (c *Client) SetBaseURLForTesting(u string) {
+	c.baseURL = u
+}
+
 // ensureValidToken checks if the OAuth token is expired and refreshes if
 // needed. It returns the bearer token to use, captured under the lock so
 // concurrent refreshes cannot race with readers.
