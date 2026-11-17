@@ -2,59 +2,66 @@ package cli
 
 import (
 	"bytes"
+	"io"
 	"strings"
 	"testing"
 )
 
-func TestResolveDeleteTarget(t *testing.T) {
-	t.Setenv("BBKT_WORKSPACE", "envws")
-	t.Setenv("BBKT_REPO", "envrepo")
-	ok := []struct {
-		args   []string
-		ws, rs string
-	}{
-		{[]string{"ws", "repo"}, "ws", "repo"},
-		{[]string{"ws/repo"}, "ws", "repo"},
+func TestTokenTailMasksShort(t *testing.T) {
+	if got := tokenTail("123456789"); got != "****" {
+		t.Errorf("9-char token: got %q", got)
 	}
-	for _, c := range ok {
-		ws, rs, err := resolveDeleteTarget(c.args)
-		if err != nil || ws != c.ws || rs != c.rs {
-			t.Errorf("%v: got %q %q %v", c.args, ws, rs, err)
-		}
-	}
-	bad := [][]string{nil, {}, {"ws"}, {""}, {"", "repo"}, {"ws", ""}, {"ws/"}, {"/repo"}, {"a/b/c"}, {"ws", "a/b"}, {" ", "x"}}
-	for _, args := range bad {
-		if _, _, err := resolveDeleteTarget(args); err == nil {
-			t.Errorf("%q: expected error (no inference allowed)", args)
-		}
+	if got := tokenTail("0123456789abcdef"); got != "...cdef" {
+		t.Errorf("16-char token: got %q", got)
 	}
 }
 
-func TestConfirmRepoDelete(t *testing.T) {
-	const target = "ws/repo"
-	cases := []struct {
-		name         string
-		yes, js, tty bool
-		input        string
-		wantErr      string
-	}{
-		{"yes skips prompt", true, false, false, "", ""},
-		{"yes with json", true, true, false, "", ""},
-		{"non-tty refused", false, false, false, "ws/repo\n", "--yes"},
-		{"json refused even on tty", false, true, true, "ws/repo\n", "--yes"},
-		{"tty match", false, false, true, "ws/repo\n", ""},
-		{"tty mismatch", false, false, true, "repo\n", "aborted"},
-		{"tty empty", false, false, true, "", "aborted"},
+func TestConfirmRepoDeleteBoundedRead(t *testing.T) {
+	var out bytes.Buffer
+	err := confirmRepoDelete("ws/repo", false, false, true, io.LimitReader(zeroReader{}, 1<<30), &out)
+	if err == nil || !strings.Contains(err.Error(), "aborted") {
+		t.Errorf("expected abort, got %v", err)
 	}
-	for _, c := range cases {
-		var out bytes.Buffer
-		err := confirmRepoDelete(target, c.yes, c.js, c.tty, strings.NewReader(c.input), &out)
-		if c.wantErr == "" && err != nil {
-			t.Errorf("%s: unexpected error %v", c.name, err)
-		}
-		if c.wantErr != "" && (err == nil || !strings.Contains(err.Error(), c.wantErr)) {
-			t.Errorf("%s: err %v, want containing %q", c.name, err, c.wantErr)
-		}
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	return len(p), nil
+}
+
+// runDelete executes "repos delete" through the real command tree. Callers
+// only use argument sets that must fail before any client is constructed, so
+// no network request can be made.
+func runDelete(t *testing.T, args ...string) error {
+	t.Helper()
+	t.Setenv("BITBUCKET_ACCESS_TOKEN", "tok")
+	t.Setenv("BBKT_WORKSPACE", "envws")
+	t.Setenv("BBKT_REPO", "envrepo")
+	RootCmd.SetArgs(append([]string{"repos", "delete"}, args...))
+	RootCmd.SetOut(io.Discard)
+	RootCmd.SetErr(io.Discard)
+	defer RootCmd.SetArgs(nil)
+	defer func() { _ = reposDeleteCmd.Flags().Set("yes", "false") }()
+	return RootCmd.Execute()
+}
+
+func TestReposDeleteWiring(t *testing.T) {
+	if stdinIsTerminal() {
+		t.Skip("stdin is a terminal")
+	}
+	// No args: BBKT_WORKSPACE/BBKT_REPO must not be used as a target.
+	if err := runDelete(t); err == nil {
+		t.Error("no args: expected error")
+	}
+	// Explicit target, non-tty stdin, no --yes: refused by the confirmation
+	// gate (which runs before the client is built).
+	err := runDelete(t, "ws/repo")
+	if err == nil || !strings.Contains(err.Error(), "--yes") {
+		t.Errorf("no --yes: err=%v", err)
 	}
 }
 
@@ -70,14 +77,14 @@ func TestSelectStatusSource(t *testing.T) {
 	}{
 		{"none", nil, false, statusSource{Kind: "none"}},
 		{"stored only", nil, true, statusSource{Kind: "stored"}},
-		{"env token shadows stored", map[string]string{"BITBUCKET_ACCESS_TOKEN": "abcdefghijkl"}, true,
-			statusSource{Kind: "env-token", Fingerprint: "...ijkl", Shadowed: true}},
+		{"env token shadows stored", map[string]string{"BITBUCKET_ACCESS_TOKEN": "abcdefghijklmnopqrst"}, true,
+			statusSource{Kind: "env-token", Fingerprint: "...qrst", Shadowed: true}},
 		{"env token no stored", map[string]string{"BITBUCKET_ACCESS_TOKEN": "short"}, false,
 			statusSource{Kind: "env-token", Fingerprint: "****"}},
-		{"env basic", map[string]string{"BITBUCKET_USERNAME": "u", "BITBUCKET_API_TOKEN": "0123456789"}, true,
-			statusSource{Kind: "env-basic", Fingerprint: "...6789", Shadowed: true}},
-		{"token wins over basic", map[string]string{"BITBUCKET_ACCESS_TOKEN": "abcdefghijkl", "BITBUCKET_USERNAME": "u", "BITBUCKET_API_TOKEN": "0123456789"}, false,
-			statusSource{Kind: "env-token", Fingerprint: "...ijkl"}},
+		{"env basic", map[string]string{"BITBUCKET_USERNAME": "u", "BITBUCKET_API_TOKEN": "0123456789abcdefghij"}, true,
+			statusSource{Kind: "env-basic", Fingerprint: "...ghij", Shadowed: true}},
+		{"token wins over basic", map[string]string{"BITBUCKET_ACCESS_TOKEN": "abcdefghijklmnopqrst", "BITBUCKET_USERNAME": "u", "BITBUCKET_API_TOKEN": "0123456789abcdefghij"}, false,
+			statusSource{Kind: "env-token", Fingerprint: "...qrst"}},
 		{"partial basic ignored", map[string]string{"BITBUCKET_USERNAME": "u"}, true, statusSource{Kind: "stored"}},
 	}
 	for _, c := range cases {

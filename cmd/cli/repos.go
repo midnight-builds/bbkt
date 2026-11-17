@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 	"github.com/zach-snell/bbkt/internal/bitbucket"
 )
@@ -18,7 +19,8 @@ var reposCmd = &cobra.Command{
 	Short:   "List, get, create, and delete Bitbucket repositories",
 	Long: `Manage repositories in a Bitbucket workspace. Omit positional
 workspace/repo args inside a Bitbucket git clone and they will be
-inferred from .git/config.`,
+inferred from .git/config (except "delete", which always requires an
+explicit target).`,
 	Example: `  bbkt repos list                       # repos in current workspace
   bbkt repos list my-team               # repos in a specific workspace
   bbkt repos get my-team my-repo
@@ -246,17 +248,19 @@ func confirmRepoDelete(target string, yes, jsonOut, isTTY bool, in io.Reader, ou
 		return fmt.Errorf("refusing to delete %s without confirmation: pass --yes to confirm (required when stdin is not a terminal or --json is set)", target)
 	}
 	fmt.Fprintf(out, "This will permanently delete repository %s. Type the full name to confirm: ", target)
-	line, _ := bufio.NewReader(in).ReadString('\n')
+	// Bound the read so a pathological stdin cannot grow without limit.
+	line, _ := bufio.NewReader(io.LimitReader(in, 1024)).ReadString('\n')
 	if strings.TrimSpace(line) != target {
 		return errors.New("confirmation did not match; aborted")
 	}
 	return nil
 }
 
-// stdinIsTerminal reports whether stdin is an interactive character device.
+// stdinIsTerminal reports whether stdin is a real terminal (not merely a
+// character device such as /dev/null or /dev/zero).
 func stdinIsTerminal() bool {
-	fi, err := os.Stdin.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+	fd := os.Stdin.Fd()
+	return isatty.IsTerminal(fd) || isatty.IsCygwinTerminal(fd)
 }
 
 func init() {

@@ -145,7 +145,7 @@ func selectStatusSource(getenv func(string) string, haveStored bool) statusSourc
 }
 
 func tokenTail(t string) string {
-	if len(t) <= 8 {
+	if len(t) < 16 {
 		return "****"
 	}
 	return "..." + t[len(t)-4:]
@@ -168,7 +168,11 @@ func runStatus() {
 		return
 	}
 	if src.Shadowed {
-		fmt.Println("  Note:    a stored profile exists but is shadowed by the environment variables above")
+		note := "a stored profile exists"
+		if err == nil && creds.ProfileName != "" {
+			note = fmt.Sprintf("stored profile %q exists", creds.ProfileName)
+		}
+		fmt.Printf("  Note:    %s but is shadowed by the environment variables above\n", note)
 		return
 	}
 	if src.Kind != "stored" {
