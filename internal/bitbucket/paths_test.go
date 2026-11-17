@@ -3,6 +3,7 @@ package bitbucket
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -108,6 +109,12 @@ func recordingClient(t *testing.T) (c *Client, gotPath *string, count *int) {
 	var got string
 	var n int
 	c = newBearerClient(t, func(w http.ResponseWriter, r *http.Request) {
+		// Slash refs are first resolved to a commit via /refs/branches/{name};
+		// answer that lookup with a fixed hash and record only the real call.
+		if strings.Contains(r.URL.EscapedPath(), "/refs/branches/") {
+			_, _ = w.Write([]byte(`{"target":{"hash":"c0ffee"}}`))
+			return
+		}
 		mu.Lock()
 		got = r.URL.EscapedPath()
 		n++
@@ -147,7 +154,7 @@ func TestClientPaths_Escaped(t *testing.T) {
 		{"file content", func() error {
 			_, _, err := c.GetFileContent(GetFileContentArgs{Workspace: "w", RepoSlug: "r", Path: "dir/my file.go", Ref: "feature/x"})
 			return err
-		}, "/repositories/w/r/src/feature%2Fx/dir/my%20file.go"},
+		}, "/repositories/w/r/src/c0ffee/dir/my%20file.go"},
 		{"file content default ref", func() error {
 			_, _, err := c.GetFileContent(GetFileContentArgs{Workspace: "w", RepoSlug: "r", Path: "a.go"})
 			return err
@@ -359,5 +366,34 @@ func TestDo_ConcurrentRequests(t *testing.T) {
 	}
 	if refreshes == 0 {
 		t.Error("expected at least one token refresh")
+	}
+}
+
+func TestResolveSlashRef(t *testing.T) {
+	var paths []string
+	c := newBearerClient(t, func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.EscapedPath())
+		switch {
+		case strings.HasSuffix(r.URL.EscapedPath(), "/refs/branches/release%2Fv2"):
+			http.NotFound(w, r)
+		case strings.HasSuffix(r.URL.EscapedPath(), "/refs/tags/release%2Fv2"):
+			_, _ = w.Write([]byte(`{"target":{"hash":"abc123"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	if got, err := c.resolveSlashRef("w", "r", "main"); err != nil || got != "main" || len(paths) != 0 {
+		t.Fatalf("plain ref: got %q, %v, %d requests; want main unchanged with no request", got, err, len(paths))
+	}
+	got, err := c.resolveSlashRef("w", "r", "release/v2")
+	if err != nil || got != "abc123" {
+		t.Fatalf("tag with slash: got %q, %v; want abc123 (falls back from branches to tags)", got, err)
+	}
+	if _, err := c.resolveSlashRef("w", "r", "no/such"); err == nil || !strings.Contains(err.Error(), "no branch or tag") {
+		t.Fatalf("missing ref: err = %v", err)
+	}
+	if _, err := c.resolveSlashRef("w", "r", "a/../b"); err == nil {
+		t.Fatal("dot segments in a ref must be rejected before any request")
 	}
 }

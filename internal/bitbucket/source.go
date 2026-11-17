@@ -3,6 +3,8 @@ package bitbucket
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"strings"
 )
 
 // srcPath builds /repositories/{ws}/{repo}/src/{ref}/{path} with a validated
@@ -33,6 +35,42 @@ func srcPath(workspace, repoSlug, ref, path string) (string, error) {
 	return endpoint, nil
 }
 
+// resolveSlashRef turns a branch or tag name containing '/' (for example
+// "feature/x") into its commit hash. Bitbucket's src and filehistory
+// endpoints split the ref at the slash, escaped or not, and answer "Commit
+// not found"; a hash has no slash. Other refs are returned unchanged.
+func (c *Client) resolveSlashRef(workspace, repoSlug, ref string) (string, error) {
+	if !strings.Contains(ref, "/") {
+		return ref, nil
+	}
+	name, err := pathSegment("ref", ref)
+	if err != nil {
+		return "", err
+	}
+	var target struct {
+		Target struct {
+			Hash string `json:"hash"`
+		} `json:"target"`
+	}
+	for _, kind := range []string{"branches", "tags"} {
+		status, data, err := c.Request(http.MethodGet, fmt.Sprintf("/repositories/%s/%s/refs/%s/%s",
+			QueryEscape(workspace), QueryEscape(repoSlug), kind, name), nil)
+		if err != nil {
+			return "", fmt.Errorf("resolving ref %q: %w", ref, err)
+		}
+		if status == http.StatusNotFound {
+			continue
+		}
+		if status >= 400 {
+			return "", fmt.Errorf("resolving ref %q: %w", ref, parseAPIError(status, data))
+		}
+		if err := json.Unmarshal(data, &target); err == nil && target.Target.Hash != "" {
+			return target.Target.Hash, nil
+		}
+	}
+	return "", fmt.Errorf("no branch or tag named %q", ref)
+}
+
 type GetFileContentArgs struct {
 	Workspace string `json:"workspace" jsonschema:"Workspace slug"`
 	RepoSlug  string `json:"repo_slug" jsonschema:"Repository slug"`
@@ -46,7 +84,11 @@ func (c *Client) GetFileContent(args GetFileContentArgs) (content []byte, conten
 		return nil, "", fmt.Errorf("workspace, repo_slug, and path are required")
 	}
 
-	endpoint, err := srcPath(args.Workspace, args.RepoSlug, args.Ref, args.Path)
+	ref, err := c.resolveSlashRef(args.Workspace, args.RepoSlug, args.Ref)
+	if err != nil {
+		return nil, "", err
+	}
+	endpoint, err := srcPath(args.Workspace, args.RepoSlug, ref, args.Path)
 	if err != nil {
 		return nil, "", err
 	}
@@ -82,7 +124,11 @@ func (c *Client) ListDirectory(args ListDirectoryArgs) (*Paginated[TreeEntry], e
 	if err != nil {
 		return nil, err
 	}
-	endpoint, err := srcPath(args.Workspace, args.RepoSlug, args.Ref, cleaned)
+	ref, err := c.resolveSlashRef(args.Workspace, args.RepoSlug, args.Ref)
+	if err != nil {
+		return nil, err
+	}
+	endpoint, err := srcPath(args.Workspace, args.RepoSlug, ref, cleaned)
 	if err != nil {
 		return nil, err
 	}
@@ -118,6 +164,10 @@ func (c *Client) GetFileHistory(args GetFileHistoryArgs) (*Paginated[json.RawMes
 		pagelen = 25
 	}
 
+	ref, err := c.resolveSlashRef(args.Workspace, args.RepoSlug, ref)
+	if err != nil {
+		return nil, err
+	}
 	refSeg, err := pathSegment("ref", ref)
 	if err != nil {
 		return nil, err
