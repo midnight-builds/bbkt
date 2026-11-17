@@ -139,9 +139,37 @@ func UpdateProfileStore(fn func(*ProfileStore) error) error {
 			return fmt.Errorf("refusing to overwrite existing credentials: %w", err)
 		}
 		if err := fn(store); err != nil {
+			if errors.Is(err, errSkipWrite) {
+				return nil
+			}
 			return err
 		}
 		return writeProfileStore(path, store)
+	})
+}
+
+// errSkipWrite, returned from an UpdateProfileStore callback, aborts the
+// update without writing and without reporting an error.
+var errSkipWrite = errors.New("skip credentials write")
+
+// persistRefreshedToken writes a refreshed OAuth token back to its profile.
+// Unlike SaveProfile it merges only the token fields into the profile as it
+// is on disk now, so a long-lived process holding an older copy of creds
+// cannot revert concurrent changes. If the profile is gone (logout) or was
+// replaced by a different login, nothing is written.
+func persistRefreshedToken(creds *Credentials) error {
+	return UpdateProfileStore(func(store *ProfileStore) error {
+		cur, ok := store.Profiles[creds.ProfileName]
+		if !ok || cur == nil || !cur.IsOAuth() || cur.ClientID != creds.ClientID {
+			return errSkipWrite
+		}
+		cur.AccessToken = creds.AccessToken
+		cur.RefreshToken = creds.RefreshToken
+		cur.TokenType = creds.TokenType
+		cur.ExpiresIn = creds.ExpiresIn
+		cur.Scopes = creds.Scopes
+		cur.CreatedAt = creds.CreatedAt
+		return nil
 	})
 }
 

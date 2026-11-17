@@ -93,7 +93,7 @@ func RefreshOAuth(creds *Credentials) error {
 	creds.Scopes = result.Scopes
 	creds.CreatedAt = time.Now()
 
-	if err := SaveProfile(creds); err != nil {
+	if err := persistRefreshedToken(creds); err != nil {
 		return fmt.Errorf("%w: %w", ErrTokenNotPersisted, err)
 	}
 	return nil

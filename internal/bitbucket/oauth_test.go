@@ -3,6 +3,7 @@ package bitbucket
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -62,6 +63,11 @@ func TestRefreshOAuth_Success(t *testing.T) {
 		ClientSecret: "csec",
 		ExpiresIn:    3600,
 		CreatedAt:    time.Now().Add(-2 * time.Hour),
+	}
+
+	seed := *creds
+	if err := SaveProfile(&seed); err != nil {
+		t.Fatalf("seeding profile: %v", err)
 	}
 
 	if err := RefreshOAuth(creds); err != nil {
@@ -299,7 +305,7 @@ func TestEnsureValidToken_SaveFailureStillUsesNewToken(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(t.TempDir(), "target.json"), path); err != nil {
+	if err := os.Symlink(writeStoreFile(t, &Credentials{ProfileName: "default", AuthType: AuthTypeOAuth}), path); err != nil {
 		t.Fatal(err)
 	}
 
@@ -337,7 +343,7 @@ func TestRefreshOAuth_SaveFailureWrapsSentinel(t *testing.T) {
 
 	path, _ := CredentialsPath()
 	_ = os.MkdirAll(filepath.Dir(path), 0o700)
-	if err := os.Symlink(filepath.Join(t.TempDir(), "x"), path); err != nil {
+	if err := os.Symlink(writeStoreFile(t, &Credentials{ProfileName: "default", AuthType: AuthTypeOAuth}), path); err != nil {
 		t.Fatal(err)
 	}
 
@@ -348,5 +354,128 @@ func TestRefreshOAuth_SaveFailureWrapsSentinel(t *testing.T) {
 	}
 	if creds.AccessToken != "new" {
 		t.Errorf("creds not updated in place: %q", creds.AccessToken)
+	}
+}
+
+// writeStoreFile writes a profile store holding creds to a temp file outside
+// the credentials dir and returns its path (used as a symlink target).
+func writeStoreFile(t *testing.T, creds *Credentials) string {
+	t.Helper()
+	data, err := json.Marshal(&ProfileStore{
+		ActiveProfile: creds.ProfileName,
+		Profiles:      map[string]*Credentials{creds.ProfileName: creds},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "target.json")
+	if err := os.WriteFile(target, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return target
+}
+
+func refreshServer(t *testing.T) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}`))
+	}))
+	t.Cleanup(srv.Close)
+	withTokenEndpoint(t, srv)
+}
+
+// A refresh in a long-lived process must not revert profile changes made
+// since it loaded its copy of the credentials; it merges only token fields.
+func TestRefreshOAuth_MergesTokenFieldsOnly(t *testing.T) {
+	sandboxHome(t)
+	refreshServer(t)
+
+	stale := &Credentials{ProfileName: "work", AuthType: AuthTypeOAuth, ClientID: "cid",
+		AccessToken: "old", RefreshToken: "r", AccessibleWorkspaces: []string{"stale"}}
+	seed := *stale
+	if err := SaveProfile(&seed); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateProfileStore(func(s *ProfileStore) error {
+		s.Profiles["work"].AccessibleWorkspaces = []string{"fresh"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := RefreshOAuth(stale); err != nil {
+		t.Fatalf("RefreshOAuth: %v", err)
+	}
+	store, err := LoadProfileStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := store.Profiles["work"]
+	if got.AccessToken != "new-access" || got.RefreshToken != "new-refresh" {
+		t.Errorf("token not persisted: %+v", got)
+	}
+	if len(got.AccessibleWorkspaces) != 1 || got.AccessibleWorkspaces[0] != "fresh" {
+		t.Errorf("refresh reverted AccessibleWorkspaces to %v, want [fresh]", got.AccessibleWorkspaces)
+	}
+}
+
+// After logout, a running process that refreshes must not recreate the
+// credentials file.
+func TestRefreshOAuth_AfterLogoutDoesNotRecreateFile(t *testing.T) {
+	sandboxHome(t)
+	refreshServer(t)
+
+	creds := &Credentials{ProfileName: "default", AuthType: AuthTypeOAuth, ClientID: "cid", RefreshToken: "r"}
+	seed := *creds
+	if err := SaveProfile(&seed); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveCredentials(); err != nil {
+		t.Fatal(err)
+	}
+	if err := RefreshOAuth(creds); err != nil {
+		t.Fatalf("RefreshOAuth: %v", err)
+	}
+	path, _ := CredentialsPath()
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("credentials file recreated after logout (stat err = %v)", err)
+	}
+}
+
+// A re-login of the same profile with a different OAuth consumer must not be
+// overwritten by an old process's refresh.
+func TestRefreshOAuth_SkipsReplacedProfile(t *testing.T) {
+	sandboxHome(t)
+	refreshServer(t)
+
+	old := &Credentials{ProfileName: "default", AuthType: AuthTypeOAuth, ClientID: "old-cid", RefreshToken: "r"}
+	if err := SaveProfile(&Credentials{ProfileName: "default", AuthType: AuthTypeAPIToken, Email: "e", APIToken: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := RefreshOAuth(old); err != nil {
+		t.Fatalf("RefreshOAuth: %v", err)
+	}
+	store, err := LoadProfileStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Profiles["default"]; !got.IsAPIToken() || got.AccessToken != "" {
+		t.Errorf("re-logged-in profile overwritten: %+v", got)
+	}
+}
+
+func TestParseScopesString_CommaAndSpace(t *testing.T) {
+	cases := map[string][]string{
+		"":                   nil,
+		" , ":                nil,
+		"account repository": {"account", "repository"},
+		"read:repository:bitbucket, write:pullrequest:bitbucket": {"read:repository:bitbucket", "write:pullrequest:bitbucket"},
+		"account,repository pullrequest":                         {"account", "repository", "pullrequest"},
+	}
+	for in, want := range cases {
+		got := parseScopesString(in)
+		if strings.Join(got, "|") != strings.Join(want, "|") || (want == nil) != (got == nil) {
+			t.Errorf("parseScopesString(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
