@@ -25,7 +25,7 @@ NC='\033[0m' # No Color
 info() { echo -e "${BLUE}==>${NC} $1"; }
 success() { echo -e "${GREEN}==>${NC} $1"; }
 warn() { echo -e "${YELLOW}==>${NC} $1"; }
-error() { echo -e "${RED}==>${NC} $1"; exit 1; }
+error() { echo -e "${RED}==>${NC} $1" >&2; exit 1; }
 
 # Detect OS
 detect_os() {
@@ -92,6 +92,10 @@ main() {
     # Check for curl
     if ! has_command curl; then
         error "curl is required but not installed"
+    fi
+
+    if ! has_command sha256sum && ! has_command shasum; then
+        error "sha256sum or shasum is required to verify the download"
     fi
 
     OS=$(detect_os)
