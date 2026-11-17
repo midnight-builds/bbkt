@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -109,7 +110,12 @@ func getClient() *bitbucket.Client {
 		// Auto refresh if needed
 		if creds.IsExpired() {
 			err = bitbucket.RefreshOAuth(creds)
-			if err != nil {
+			switch {
+			case errors.Is(err, bitbucket.ErrTokenNotPersisted):
+				// The refresh worked and creds holds the new token; only the
+				// write-back failed. Keep going rather than discard it.
+				fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+			case err != nil:
 				fmt.Fprintf(os.Stderr, "Failed to refresh oauth token. Run 'bbkt auth' again.\n")
 				os.Exit(1)
 			}

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 const baseURL = "https://api.bitbucket.org/2.0"
@@ -160,7 +161,11 @@ func (c *Client) do(method, path string, bodyData []byte, contentType string, ac
 	if resp.StatusCode == http.StatusUnauthorized && c.canRefresh() {
 		resp.Body.Close()
 		c.mu.Lock()
-		c.oauthCreds.CreatedAt = time.Time{} // force expiry
+		// Force expiry only if no concurrent request has already refreshed
+		// past the token that just got the 401.
+		if c.token == token {
+			c.oauthCreds.CreatedAt = time.Time{}
+		}
 		c.mu.Unlock()
 		newToken, err := c.ensureValidToken()
 		if err != nil {
@@ -270,12 +275,13 @@ func parseScopesString(s string) []string {
 	if s == "" {
 		return nil
 	}
-	parts := strings.Split(s, ",")
-	var scopes []string
-	for _, p := range parts {
-		if trimmed := strings.TrimSpace(p); trimmed != "" {
-			scopes = append(scopes, trimmed)
-		}
+	// API tokens report scopes comma-separated (X-OAuth-Scopes); the OAuth
+	// token endpoint returns them space-separated. Accept both.
+	scopes := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || unicode.IsSpace(r)
+	})
+	if len(scopes) == 0 {
+		return nil
 	}
 	return scopes
 }
