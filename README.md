@@ -16,7 +16,7 @@ A complete command-line interface and Model Context Protocol (MCP) server writte
 - **Git-aware** — Most commands auto-detect the current workspace and repo from `.git/config`, so `bbkt prs list` Just Works inside a Bitbucket repo.
 - **Multi-profile** — Switch between personal and work Atlassian accounts with `--profile` or `BBKT_PROFILE`; auto-selects the right profile based on your git config email.
 - **Two auth modes** — Atlassian API tokens (Basic auth) or interactive OAuth 2.0 with automatic token refresh.
-- **Scope-aware MCP** — At startup the MCP server introspects your token's granted scopes and silently hides tools the token can't use, preventing the AI from hallucinating successful writes it doesn't have permission for.
+- **Scope-aware MCP** — At startup the MCP server introspects your token's granted scopes and hides tools whose read scope the token lacks. This is a usability filter, not a write guard: limit what an agent can change with a least-privilege credential (see [Scope-gated tools](#scope-gated-tools)).
 - **Read and write** — Repositories, workspaces, pipelines, issues, pull requests, comments, and source code (read/write/delete) — all via the API.
 
 ## Installation
@@ -218,23 +218,42 @@ By default the server reads credentials from `~/.config/bbkt/credentials.json` (
 }
 ```
 
-### HTTP Streamable (for remote / network clients)
+### HTTP Streamable (for clients that can't spawn a process)
 
 ```bash
 bbkt mcp --port 8080
 ```
 
-This serves the MCP Streamable Transport (SSE-based) on the given port.
+This serves the MCP Streamable Transport (SSE-based) on `127.0.0.1:8080`.
+
+- **Bearer token required.** Every request must send `Authorization: Bearer <token>`; anything else gets `401`. Set the token with `BBKT_MCP_HTTP_TOKEN` (at least 16 characters). If it is unset on loopback, bbkt generates a random token and prints it once to stderr.
+- **Loopback only by default.** `--host <addr>` changes the bind address. A non-loopback address is refused unless you pass `--allow-remote` **and** set `BBKT_MCP_HTTP_TOKEN`:
+
+  ```bash
+  export BBKT_MCP_HTTP_TOKEN="$(openssl rand -hex 32)"
+  bbkt mcp --port 8080 --host 0.0.0.0 --allow-remote
+  ```
+
+- **Cleartext.** There is no TLS; the token and all Bitbucket data travel unencrypted. Put a remote bind behind a TLS-terminating reverse proxy.
 
 ### Scope-gated tools
 
-The MCP server calls Bitbucket's `/user` endpoint at startup to introspect your token's granted scopes, then **silently drops any tool whose required scope is missing**. This prevents the AI from confidently calling, say, `manage_pipelines` (`pipeline` scope) on a read-only token and getting a `403` it can't recover from.
+The MCP server calls Bitbucket's `/user` endpoint at startup to introspect your token's granted scopes, then drops any tool whose **read** scope is missing (e.g. `manage_pipelines` without `pipeline`). If introspection fails, the server refuses to start; set `BBKT_SKIP_SCOPE_CHECK=1` to start anyway.
 
-To explicitly deny tools even when scopes allow them:
+> [!IMPORTANT]
+> Scope filtering does not hide write actions. A read-only token still exposes `create`, `delete`, `merge`, `write_file`, `trigger` and the other write actions inside the multiplexed `manage_*` tools; they fail at the API instead. The credential is what limits an agent, so use **least-privilege credentials** for agent setups, ideally a Bitbucket [repository or workspace access token](https://support.atlassian.com/bitbucket-cloud/docs/access-tokens/) passed via `BITBUCKET_ACCESS_TOKEN`.
+
+To remove tools outright, regardless of scopes:
 
 ```bash
-export BITBUCKET_DISABLED_TOOLS="manage_repositories,manage_pipelines"
+export BITBUCKET_DISABLED_TOOLS="manage_repositories,manage_pipelines,bitbucket_api"
 ```
+
+Valid names: `manage_workspaces`, `manage_repositories`, `manage_refs`, `manage_commits`, `manage_pull_requests`, `manage_pr_comments`, `manage_source`, `manage_pipelines`, `manage_issues`, `bitbucket_api`. Unknown names are rejected at startup.
+
+### `bitbucket_api` passthrough
+
+`bitbucket_api` gives the agent authenticated access to any Bitbucket v2 endpoint without a typed tool. Only `GET`/`HEAD` are allowed by default; set `BBKT_API_ALLOW_WRITE=1` on the server to allow `POST`/`PUT`/`PATCH`/`DELETE`, which lets the agent call any write endpoint the credential permits.
 
 To skip credential loading entirely (tools will return auth-required errors when invoked — useful for testing the transport):
 
@@ -248,12 +267,15 @@ bbkt mcp --no-auth
 |---|---|---|
 | `BITBUCKET_USERNAME` | Atlassian email (despite the legacy name) — used with `BITBUCKET_API_TOKEN` | Only for env-var API-token auth |
 | `BITBUCKET_API_TOKEN` | Atlassian scoped API token | Only for env-var API-token auth |
-| `BITBUCKET_ACCESS_TOKEN` | OAuth 2.0 bearer token (overrides stored profile) | Only for env-var OAuth |
+| `BITBUCKET_ACCESS_TOKEN` | Bearer token: OAuth 2.0 access token or repository/workspace access token (overrides stored profile) | Only for env-var bearer auth |
 | `BITBUCKET_OAUTH_CLIENT_ID` | OAuth consumer Key | Only for `bbkt auth --oauth` |
 | `BITBUCKET_OAUTH_CLIENT_SECRET` | OAuth consumer Secret | Only for `bbkt auth --oauth` |
 | `BBKT_PROFILE` | Profile name override (one-shot) | No |
 | `BBKT_OAUTH_CALLBACK_PORT` | Local callback port for OAuth flow (default 8976) | No |
-| `BITBUCKET_DISABLED_TOOLS` | Comma-separated MCP tools to disable | No |
+| `BITBUCKET_DISABLED_TOOLS` | Comma-separated MCP tools to remove (names above; unknown names rejected at startup) | No |
+| `BBKT_API_ALLOW_WRITE` | `1` allows write methods through the `bitbucket_api` MCP passthrough | No |
+| `BBKT_SKIP_SCOPE_CHECK` | `1` starts the MCP server even if scope introspection fails | No |
+| `BBKT_MCP_HTTP_TOKEN` | Bearer token for `bbkt mcp --port` (generated on loopback if unset) | Required for `--allow-remote` |
 
 When `BITBUCKET_ACCESS_TOKEN` *or* (`BITBUCKET_USERNAME` + `BITBUCKET_API_TOKEN`) is set, the stored profile is bypassed entirely.
 
@@ -270,8 +292,9 @@ When `BITBUCKET_ACCESS_TOKEN` *or* (`BITBUCKET_USERNAME` + `BITBUCKET_API_TOKEN`
 | `manage_pr_comments` | list, create, update, delete, resolve, unresolve | `pullrequest` |
 | `manage_pipelines` | list, get, trigger, stop, list-steps, get-step-log | `pipeline` |
 | `manage_issues` | list, get, create, update | `issue` |
+| `bitbucket_api` | any v2 endpoint; reads only unless `BBKT_API_ALLOW_WRITE=1` | — |
 
-Scopes shown are the OAuth-style names. For Atlassian API tokens, the equivalent granular scopes are `read:<scope>:bitbucket` / `write:<scope>:bitbucket`.
+"Required Scope" is the read scope that keeps a tool registered; write actions inside a tool still need the matching write scope at call time. Scopes shown are the OAuth-style names. For Atlassian API tokens, the equivalent granular scopes are `read:<scope>:bitbucket` / `write:<scope>:bitbucket`.
 
 ## Development
 
