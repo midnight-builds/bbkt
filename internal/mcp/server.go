@@ -12,18 +12,21 @@ import (
 )
 
 // New creates and configures the Bitbucket MCP server with all tools registered.
-func New(username, password, token string) *mcp.Server {
+// It fails if BITBUCKET_DISABLED_TOOLS names an unknown tool or if the token's
+// scopes cannot be introspected (see registerTools).
+func New(username, password, token string) (*mcp.Server, error) {
 	client := bitbucket.NewClient(username, password, token)
 	return newServer(client)
 }
 
 // NewFromCredentials creates the MCP server from stored credentials, mapping cached scopes.
-func NewFromCredentials(creds *bitbucket.Credentials) *mcp.Server {
+// It fails under the same conditions as New.
+func NewFromCredentials(creds *bitbucket.Credentials) (*mcp.Server, error) {
 	client := bitbucket.NewClientFromCredentials(creds)
 	return newServer(client)
 }
 
-func newServer(client *bitbucket.Client) *mcp.Server {
+func newServer(client *bitbucket.Client) (*mcp.Server, error) {
 	s := mcp.NewServer(
 		&mcp.Implementation{
 			Name:    "bbkt",
@@ -32,8 +35,10 @@ func newServer(client *bitbucket.Client) *mcp.Server {
 		nil,
 	)
 
-	registerTools(s, client)
-	return s
+	if err := registerTools(s, client); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 func getToolRequiredScope(toolName string) []string {
@@ -118,16 +123,140 @@ func hasRequiredScope(tokenScopes, required []string) bool {
 	return false
 }
 
-// addTool is a helper function to conditionally register a generic tool handler
-func addTool[In any](s *mcp.Server, disabled map[string]bool, tokenScopes []string, tool mcp.Tool, handler func(context.Context, *mcp.CallToolRequest, In) (*mcp.CallToolResult, any, error)) {
-	if disabled[tool.Name] {
-		return
-	}
-	if !hasRequiredScope(tokenScopes, getToolRequiredScope(tool.Name)) {
-		return // Silently drop the tool if the token lacks the required scope
-	}
-	mcp.AddTool(s, &tool, handler)
+// toolDef describes one MCP tool. toolDefs is the single source of truth for
+// the tool set: authenticated and unauthenticated registration and
+// BITBUCKET_DISABLED_TOOLS validation all derive from it.
+type toolDef struct {
+	tool mcp.Tool
+	// register adds the tool to s with a handler backed by c.
+	register func(s *mcp.Server, c *bitbucket.Client)
+	// registerUnauthenticated adds the tool with an auth-required handler.
+	registerUnauthenticated func(s *mcp.Server)
 }
+
+// defineTool builds a toolDef from a tool's metadata and its handler factory,
+// capturing the handler's input type so the input schema is inferred from it.
+func defineTool[In any](name, description string, handler func(*bitbucket.Client) func(context.Context, *mcp.CallToolRequest, In) (*mcp.CallToolResult, any, error)) toolDef {
+	tool := mcp.Tool{Name: name, Description: description}
+	return toolDef{
+		tool: tool,
+		register: func(s *mcp.Server, c *bitbucket.Client) {
+			t := tool
+			mcp.AddTool(s, &t, handler(c))
+		},
+		registerUnauthenticated: func(s *mcp.Server) {
+			addUnauthenticatedTool[In](s, tool)
+		},
+	}
+}
+
+func toolDefs() []toolDef {
+	return []toolDef{
+		// ─── Workspaces ──────────────────────────────────────────────────
+		defineTool("manage_workspaces",
+			"Unified tool for getting and listing Bitbucket workspaces",
+			ManageWorkspacesHandler),
+
+		// ─── Repositories ────────────────────────────────────────────────
+		defineTool("manage_repositories",
+			"Unified tool for listing, getting, creating, and deleting repositories",
+			ManageRepositoriesHandler),
+
+		// ─── Branches & Tags ─────────────────────────────────────────────
+		defineTool("manage_refs",
+			"Unified tool for listing, creating, and deleting branches and tags",
+			ManageRefsHandler),
+
+		// ─── Commits ─────────────────────────────────────────────────────
+		defineTool("manage_commits",
+			"Unified tool for listing and getting commits, diffs, and diffstats",
+			ManageCommitsHandler),
+
+		// ─── Pull Requests ───────────────────────────────────────────────
+		defineTool("manage_pull_requests",
+			"Unified tool covering all pull request operations (list, get, create, update, merge, approve, unapprove, decline, diff, diffstat, commits)",
+			ManagePullRequestsHandler),
+
+		// ─── PR Comments ─────────────────────────────────────────────────
+		defineTool("manage_pr_comments",
+			"Unified tool for managing pull request comments (list, create, update, delete, resolve, unresolve)",
+			ManagePRCommentsHandler),
+
+		// ─── Source / File Browsing ──────────────────────────────────────
+		defineTool("manage_source",
+			"Unified tool for source code operations (read, list_directory, get_history, search, write, delete)",
+			ManageSourceHandler),
+
+		// ─── Pipelines ───────────────────────────────────────────────────
+		defineTool("manage_pipelines",
+			"Unified tool for managing Bitbucket Pipelines (list, get, trigger, stop, list-steps, get-step-log)",
+			ManagePipelinesHandler),
+
+		// ─── Issues ──────────────────────────────────────────────────────
+		defineTool("manage_issues",
+			"Unified tool for managing repository issues (list, get, create, update)",
+			ManageIssuesHandler),
+
+		// ─── Raw API passthrough (escape hatch) ──────────────────────────
+		defineTool("bitbucket_api",
+			"Authenticated passthrough to ANY Bitbucket Cloud REST API v2 endpoint not covered by the manage_* tools above (e.g. pipelines-config/OIDC, webhooks, branch restrictions). Prefer a typed manage_* tool when one fits; use this for the long tail instead of calling the API yourself. Reads (GET/HEAD) work by default; write methods are rejected unless BBKT_API_ALLOW_WRITE is set on the server. Supports pagination and returns the raw HTTP status + JSON body.",
+			APIRequestHandler),
+	}
+}
+
+// toolNames returns the name of every tool the server can register, in
+// registration order.
+func toolNames() []string {
+	defs := toolDefs()
+	names := make([]string, 0, len(defs))
+	for i := range defs {
+		names = append(names, defs[i].tool.Name)
+	}
+	return names
+}
+
+// parseDisabledTools parses a comma-separated BITBUCKET_DISABLED_TOOLS value.
+// Empty entries (e.g. from a trailing comma) are ignored. Any entry that is not
+// a registered tool name is an error: silently ignoring a typo would leave the
+// tool exposed while the operator believes it is denied.
+func parseDisabledTools(raw string) (map[string]bool, error) {
+	valid := toolNames()
+	known := make(map[string]bool, len(valid))
+	for _, n := range valid {
+		known[n] = true
+	}
+
+	disabled := make(map[string]bool)
+	var unknown []string
+	for _, entry := range strings.Split(raw, ",") {
+		name := strings.TrimSpace(entry)
+		if name == "" {
+			continue
+		}
+		if !known[name] {
+			unknown = append(unknown, fmt.Sprintf("%q", name))
+			continue
+		}
+		disabled[name] = true
+	}
+	if len(unknown) > 0 {
+		return nil, fmt.Errorf("BITBUCKET_DISABLED_TOOLS contains unknown tool name(s): %s (valid names: %s)",
+			strings.Join(unknown, ", "), strings.Join(valid, ", "))
+	}
+	return disabled, nil
+}
+
+// skipScopeCheck reports whether BBKT_SKIP_SCOPE_CHECK opts out of failing
+// closed when token scope introspection fails.
+func skipScopeCheck() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("BBKT_SKIP_SCOPE_CHECK"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+const skipScopeCheckHint = "Fix the credentials, or set BBKT_SKIP_SCOPE_CHECK=1 to start anyway with scope filtering disabled (every tool not in BITBUCKET_DISABLED_TOOLS is exposed)."
 
 // NewUnauthenticated creates an MCP server with all tools registered but no working client.
 // Every tool call returns an auth-required message. Used for server inspection (e.g., Glama).
@@ -157,137 +286,46 @@ func addUnauthenticatedTool[In any](s *mcp.Server, tool mcp.Tool) {
 }
 
 func registerToolsUnauthenticated(s *mcp.Server) {
-	// ─── Workspaces ──────────────────────────────────────────────────
-	addUnauthenticatedTool[ManageWorkspacesArgs](s, mcp.Tool{
-		Name:        "manage_workspaces",
-		Description: "Unified tool for getting and listing Bitbucket workspaces",
-	})
-
-	// ─── Repositories ────────────────────────────────────────────────
-	addUnauthenticatedTool[ManageRepositoriesArgs](s, mcp.Tool{
-		Name:        "manage_repositories",
-		Description: "Unified tool for listing, getting, creating, and deleting repositories",
-	})
-
-	// ─── Branches & Tags ─────────────────────────────────────────────
-	addUnauthenticatedTool[ManageRefsArgs](s, mcp.Tool{
-		Name:        "manage_refs",
-		Description: "Unified tool for listing, creating, and deleting branches and tags",
-	})
-
-	// ─── Commits ─────────────────────────────────────────────────────
-	addUnauthenticatedTool[ManageCommitsArgs](s, mcp.Tool{
-		Name:        "manage_commits",
-		Description: "Unified tool for listing and getting commits, diffs, and diffstats",
-	})
-
-	// ─── Pull Requests ───────────────────────────────────────────────
-	addUnauthenticatedTool[ManagePullRequestsArgs](s, mcp.Tool{
-		Name:        "manage_pull_requests",
-		Description: "Unified tool covering all pull request operations (list, get, create, update, merge, approve, unapprove, decline, diff, diffstat, commits)",
-	})
-
-	// ─── PR Comments ─────────────────────────────────────────────────
-	addUnauthenticatedTool[ManagePRCommentsArgs](s, mcp.Tool{
-		Name:        "manage_pr_comments",
-		Description: "Unified tool for managing pull request comments (list, create, update, delete, resolve, unresolve)",
-	})
-
-	// ─── Source / File Browsing ──────────────────────────────────────
-	addUnauthenticatedTool[ManageSourceArgs](s, mcp.Tool{
-		Name:        "manage_source",
-		Description: "Unified tool for source code operations (read, list_directory, get_history, search, write, delete)",
-	})
-
-	// ─── Pipelines ───────────────────────────────────────────────────
-	addUnauthenticatedTool[ManagePipelinesArgs](s, mcp.Tool{
-		Name:        "manage_pipelines",
-		Description: "Unified tool for managing Bitbucket Pipelines (list, get, trigger, stop, list-steps, get-step-log)",
-	})
-
-	// ─── Issues ──────────────────────────────────────────────────────
-	addUnauthenticatedTool[APIRequestArgs](s, mcp.Tool{
-		Name:        "bitbucket_api",
-		Description: "Authenticated passthrough to ANY Bitbucket Cloud REST API v2 endpoint not covered by the manage_* tools above (e.g. pipelines-config/OIDC, webhooks, branch restrictions). Prefer a typed manage_* tool when one fits; use this for the long tail instead of calling the API yourself. Reads (GET/HEAD) work by default; write methods are rejected unless BBKT_API_ALLOW_WRITE is set on the server. Supports pagination and returns the raw HTTP status + JSON body.",
-	})
-
-	addUnauthenticatedTool[ManageIssuesArgs](s, mcp.Tool{
-		Name:        "manage_issues",
-		Description: "Unified tool for managing repository issues (list, get, create, update)",
-	})
+	defs := toolDefs()
+	for i := range defs {
+		defs[i].registerUnauthenticated(s)
+	}
 }
 
-func registerTools(s *mcp.Server, c *bitbucket.Client) {
-	disabledToolsEnv := os.Getenv("BITBUCKET_DISABLED_TOOLS")
-	disabled := make(map[string]bool)
-	if disabledToolsEnv != "" {
-		for _, t := range strings.Split(disabledToolsEnv, ",") {
-			disabled[strings.TrimSpace(t)] = true
-		}
+// registerTools adds every tool that is not disabled and whose required scope
+// the token holds. It fails closed: an unknown BITBUCKET_DISABLED_TOOLS entry
+// or a failed scope introspection is an error. With BBKT_SKIP_SCOPE_CHECK set,
+// an introspection failure only warns and scope filtering is skipped.
+func registerTools(s *mcp.Server, c *bitbucket.Client) error {
+	disabled, err := parseDisabledTools(os.Getenv("BITBUCKET_DISABLED_TOOLS"))
+	if err != nil {
+		return err
 	}
 
 	tokenScopes, err := c.Scopes()
+	if err == nil && len(tokenScopes) == 0 {
+		// A successful introspection yields at least one scope; an empty list
+		// would make hasRequiredScope allow every tool, so treat it as a failure.
+		err = fmt.Errorf("token scope introspection returned no scopes")
+	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to fetch token scopes for introspection: %v\n", err)
+		if !skipScopeCheck() {
+			return fmt.Errorf("failed to introspect token scopes: %w\n\n%s", err, skipScopeCheckHint)
+		}
+		fmt.Fprintf(os.Stderr, "Warning: failed to fetch token scopes for introspection; BBKT_SKIP_SCOPE_CHECK is set, so scope filtering is disabled: %v\n", err)
+		tokenScopes = nil // empty scopes make hasRequiredScope allow every tool
 	}
 
-	// ─── Workspaces ──────────────────────────────────────────────────
-	addTool(s, disabled, tokenScopes, mcp.Tool{
-		Name:        "manage_workspaces",
-		Description: "Unified tool for getting and listing Bitbucket workspaces",
-	}, ManageWorkspacesHandler(c))
-
-	// ─── Repositories ────────────────────────────────────────────────
-	addTool(s, disabled, tokenScopes, mcp.Tool{
-		Name:        "manage_repositories",
-		Description: "Unified tool for listing, getting, creating, and deleting repositories",
-	}, ManageRepositoriesHandler(c))
-
-	// ─── Branches & Tags ─────────────────────────────────────────────
-	addTool(s, disabled, tokenScopes, mcp.Tool{
-		Name:        "manage_refs",
-		Description: "Unified tool for listing, creating, and deleting branches and tags",
-	}, ManageRefsHandler(c))
-
-	// ─── Commits ─────────────────────────────────────────────────────
-	addTool(s, disabled, tokenScopes, mcp.Tool{
-		Name:        "manage_commits",
-		Description: "Unified tool for listing and getting commits, diffs, and diffstats",
-	}, ManageCommitsHandler(c))
-
-	// ─── Pull Requests ───────────────────────────────────────────────
-	addTool(s, disabled, tokenScopes, mcp.Tool{
-		Name:        "manage_pull_requests",
-		Description: "Unified tool covering all pull request operations (list, get, create, update, merge, approve, unapprove, decline, diff, diffstat, commits)",
-	}, ManagePullRequestsHandler(c))
-
-	// ─── PR Comments ─────────────────────────────────────────────────
-	addTool(s, disabled, tokenScopes, mcp.Tool{
-		Name:        "manage_pr_comments",
-		Description: "Unified tool for managing pull request comments (list, create, update, delete, resolve, unresolve)",
-	}, ManagePRCommentsHandler(c))
-
-	// ─── Source / File Browsing ──────────────────────────────────────
-	addTool(s, disabled, tokenScopes, mcp.Tool{
-		Name:        "manage_source",
-		Description: "Unified tool for source code operations (read, list_directory, get_history, search, write, delete)",
-	}, ManageSourceHandler(c))
-
-	// ─── Pipelines ───────────────────────────────────────────────────
-	addTool(s, disabled, tokenScopes, mcp.Tool{
-		Name:        "manage_pipelines",
-		Description: "Unified tool for managing Bitbucket Pipelines (list, get, trigger, stop, list-steps, get-step-log)",
-	}, ManagePipelinesHandler(c))
-
-	// ─── Issues ──────────────────────────────────────────────────────
-	addTool(s, disabled, tokenScopes, mcp.Tool{
-		Name:        "manage_issues",
-		Description: "Unified tool for managing repository issues (list, get, create, update)",
-	}, ManageIssuesHandler(c))
-
-	// ─── Raw API passthrough (escape hatch) ──────────────────────────
-	addTool(s, disabled, tokenScopes, mcp.Tool{
-		Name:        "bitbucket_api",
-		Description: "Authenticated passthrough to ANY Bitbucket Cloud REST API v2 endpoint not covered by the manage_* tools above (e.g. pipelines-config/OIDC, webhooks, branch restrictions). Prefer a typed manage_* tool when one fits; use this for the long tail instead of calling the API yourself. Reads (GET/HEAD) work by default; write methods are rejected unless BBKT_API_ALLOW_WRITE is set on the server. Supports pagination and returns the raw HTTP status + JSON body.",
-	}, APIRequestHandler(c))
+	defs := toolDefs()
+	for i := range defs {
+		d := &defs[i]
+		if disabled[d.tool.Name] {
+			continue
+		}
+		if !hasRequiredScope(tokenScopes, getToolRequiredScope(d.tool.Name)) {
+			continue // Silently drop the tool if the token lacks the required scope
+		}
+		d.register(s, c)
+	}
+	return nil
 }
