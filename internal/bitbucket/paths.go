@@ -67,6 +67,29 @@ func pathMulti(name, v string) (string, error) {
 	return strings.Join(segs, "/"), nil
 }
 
+// cleanRepoPath normalizes a path inside a repository the way a user or agent
+// writes it: "." and empty segments are dropped, so ".", "./", "/" and ""
+// all mean the repository root and "./src//a.go" becomes "src/a.go". A
+// trailing slash on a non-root path is kept. ".." is still rejected: it is the
+// only segment that could move the request outside the src tree.
+func cleanRepoPath(name, p string) (string, error) {
+	kept := make([]string, 0, strings.Count(p, "/")+1)
+	for _, s := range strings.Split(p, "/") {
+		switch s {
+		case "", ".":
+			continue
+		case "..":
+			return "", fmt.Errorf("invalid %s %q: must not contain '..' path segments", name, p)
+		}
+		kept = append(kept, s)
+	}
+	out := strings.Join(kept, "/")
+	if out != "" && strings.HasSuffix(p, "/") {
+		out += "/"
+	}
+	return out, nil
+}
+
 // rejectDotSegments is a last line of defence applied to every request path:
 // after percent-decoding, no path segment (or '/'-separated part of one)
 // may be "." or "..".

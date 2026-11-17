@@ -180,6 +180,27 @@ func TestClientPaths_Escaped(t *testing.T) {
 			_, err := c.GetFileHistory(GetFileHistoryArgs{Workspace: "w", RepoSlug: "r", Path: "a/b c.go"})
 			return err
 		}, "/repositories/w/r/filehistory/HEAD/a/b%20c.go"},
+		// "." and "/" mean the repo root, as they did before path validation.
+		{"list dir dot", func() error {
+			_, err := c.ListDirectory(ListDirectoryArgs{Workspace: "w", RepoSlug: "r", Path: "."})
+			return err
+		}, "/repositories/w/r/src/HEAD/"},
+		{"list dir slash", func() error {
+			_, err := c.ListDirectory(ListDirectoryArgs{Workspace: "w", RepoSlug: "r", Path: "/"})
+			return err
+		}, "/repositories/w/r/src/HEAD/"},
+		{"list dir dot-slash subdir", func() error {
+			_, err := c.ListDirectory(ListDirectoryArgs{Workspace: "w", RepoSlug: "r", Path: "./src/"})
+			return err
+		}, "/repositories/w/r/src/HEAD/src/"},
+		{"file content dot-slash", func() error {
+			_, _, err := c.GetFileContent(GetFileContentArgs{Workspace: "w", RepoSlug: "r", Path: "./a/./b.go"})
+			return err
+		}, "/repositories/w/r/src/HEAD/a/b.go"},
+		{"file history leading slash", func() error {
+			_, err := c.GetFileHistory(GetFileHistoryArgs{Workspace: "w", RepoSlug: "r", Path: "/a.go"})
+			return err
+		}, "/repositories/w/r/filehistory/HEAD/a.go"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -231,7 +252,15 @@ func TestClientPaths_TraversalRejected(t *testing.T) {
 			return err
 		},
 		"list dir traversal": func() error {
-			_, err := c.ListDirectory(ListDirectoryArgs{Workspace: "w", RepoSlug: "r", Path: "a/./b"})
+			_, err := c.ListDirectory(ListDirectoryArgs{Workspace: "w", RepoSlug: "r", Path: "a/../b"})
+			return err
+		},
+		"list dir leading dotdot": func() error {
+			_, err := c.ListDirectory(ListDirectoryArgs{Workspace: "w", RepoSlug: "r", Path: "./../x"})
+			return err
+		},
+		"history of root": func() error {
+			_, err := c.GetFileHistory(GetFileHistoryArgs{Workspace: "w", RepoSlug: "r", Path: "."})
 			return err
 		},
 		"history traversal": func() error {

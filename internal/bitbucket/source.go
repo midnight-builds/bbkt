@@ -7,10 +7,15 @@ import (
 
 // srcPath builds /repositories/{ws}/{repo}/src/{ref}/{path} with a validated
 // ref (default HEAD) and, when path is non-empty, a validated file path. With
-// an empty path the result ends at the ref (no trailing slash).
+// an empty path the result ends at the ref (no trailing slash). The path is
+// normalized first, so "." or "/" mean the repository root.
 func srcPath(workspace, repoSlug, ref, path string) (string, error) {
 	if ref == "" {
 		ref = "HEAD"
+	}
+	path, err := cleanRepoPath("path", path)
+	if err != nil {
+		return "", err
 	}
 	refSeg, err := pathSegment("ref", ref)
 	if err != nil {
@@ -73,11 +78,15 @@ func (c *Client) ListDirectory(args ListDirectoryArgs) (*Paginated[TreeEntry], e
 		maxDepth = 1
 	}
 
-	endpoint, err := srcPath(args.Workspace, args.RepoSlug, args.Ref, args.Path)
+	cleaned, err := cleanRepoPath("path", args.Path)
 	if err != nil {
 		return nil, err
 	}
-	if args.Path == "" {
+	endpoint, err := srcPath(args.Workspace, args.RepoSlug, args.Ref, cleaned)
+	if err != nil {
+		return nil, err
+	}
+	if cleaned == "" {
 		endpoint += "/"
 	}
 
@@ -113,7 +122,14 @@ func (c *Client) GetFileHistory(args GetFileHistoryArgs) (*Paginated[json.RawMes
 	if err != nil {
 		return nil, err
 	}
-	filePath, err := pathMulti("path", args.Path)
+	cleaned, err := cleanRepoPath("path", args.Path)
+	if err != nil {
+		return nil, err
+	}
+	if cleaned == "" {
+		return nil, fmt.Errorf("path must name a file, not the repository root")
+	}
+	filePath, err := pathMulti("path", cleaned)
 	if err != nil {
 		return nil, err
 	}
