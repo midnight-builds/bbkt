@@ -81,8 +81,13 @@ func (c *Client) GetDiff(args GetDiffArgs) ([]byte, error) {
 		return nil, fmt.Errorf("workspace, repo_slug, and spec are required")
 	}
 
+	spec, err := pathMulti("spec", args.Spec)
+	if err != nil {
+		return nil, err
+	}
+
 	endpoint := fmt.Sprintf("/repositories/%s/%s/diff/%s",
-		QueryEscape(args.Workspace), QueryEscape(args.RepoSlug), args.Spec)
+		QueryEscape(args.Workspace), QueryEscape(args.RepoSlug), spec)
 	if args.Path != "" {
 		endpoint += "?path=" + QueryValueEscape(args.Path)
 	}
@@ -103,6 +108,11 @@ func (c *Client) GetDiffStat(args GetDiffStatArgs) (*Paginated[DiffStat], error)
 		return nil, fmt.Errorf("workspace, repo_slug, and spec are required")
 	}
 
+	spec, err := pathMulti("spec", args.Spec)
+	if err != nil {
+		return nil, err
+	}
+
 	return GetPaginated[DiffStat](c, fmt.Sprintf("/repositories/%s/%s/diffstat/%s",
-		QueryEscape(args.Workspace), QueryEscape(args.RepoSlug), args.Spec))
+		QueryEscape(args.Workspace), QueryEscape(args.RepoSlug), spec))
 }
