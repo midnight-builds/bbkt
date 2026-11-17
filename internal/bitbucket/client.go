@@ -81,7 +81,12 @@ func (c *Client) ensureValidToken() (string, error) {
 	}
 
 	if err := RefreshOAuth(c.oauthCreds); err != nil {
-		return "", fmt.Errorf("refreshing token: %w", err)
+		if !errors.Is(err, ErrTokenNotPersisted) {
+			return "", fmt.Errorf("refreshing token: %w", err)
+		}
+		// The refresh itself worked; keep using the new token in this
+		// process even though it could not be written back to disk.
+		_, _ = fmt.Fprintf(stderrOut, "warning: %v\n", err)
 	}
 
 	c.token = c.oauthCreds.AccessToken

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -30,8 +31,14 @@ var (
 // Override at runtime with BBKT_OAUTH_CALLBACK_PORT if this port is in use.
 const DefaultOAuthCallbackPort = 8976
 
+// ErrTokenNotPersisted is wrapped by RefreshOAuth when the token refresh
+// succeeded (creds already hold the new token) but saving it to disk failed.
+var ErrTokenNotPersisted = errors.New("refreshed OAuth token could not be saved")
+
 // RefreshOAuth uses the refresh token to get a new access token.
-// Updates the Credentials in place and persists to disk.
+// Updates the Credentials in place and persists to disk. If only the save
+// fails, the returned error wraps ErrTokenNotPersisted and creds are still
+// updated, so callers can keep using the new token for this process.
 func RefreshOAuth(creds *Credentials) error {
 	data := url.Values{
 		"grant_type":    {"refresh_token"},
@@ -86,7 +93,10 @@ func RefreshOAuth(creds *Credentials) error {
 	creds.Scopes = result.Scopes
 	creds.CreatedAt = time.Now()
 
-	return SaveProfile(creds)
+	if err := SaveProfile(creds); err != nil {
+		return fmt.Errorf("%w: %w", ErrTokenNotPersisted, err)
+	}
+	return nil
 }
 
 // OAuthLogin performs the Authorization Code Grant flow with a localhost callback.
