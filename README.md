@@ -238,10 +238,10 @@ This serves the MCP Streamable Transport (SSE-based) on `127.0.0.1:8080`.
 
 ### Scope-gated tools
 
-The MCP server calls Bitbucket's `/user` endpoint at startup to introspect your token's granted scopes, then drops any tool whose **read** scope is missing (e.g. `manage_pipelines` without `pipeline`). If introspection fails, the server refuses to start; set `BBKT_SKIP_SCOPE_CHECK=1` to start anyway.
+The MCP server calls Bitbucket's `/user` endpoint at startup to introspect your token's granted scopes, then drops any tool whose **read** scope is missing (e.g. `manage_pipelines` without `pipeline`). If introspection fails, the server refuses to start; set `BBKT_SKIP_SCOPE_CHECK=1` to start anyway, in which case no scope filtering happens and every tool is registered.
 
 > [!IMPORTANT]
-> Scope filtering does not hide write actions. A read-only token still exposes `create`, `delete`, `merge`, `write_file`, `trigger` and the other write actions inside the multiplexed `manage_*` tools; they fail at the API instead. The credential is what limits an agent, so use **least-privilege credentials** for agent setups, ideally a Bitbucket [repository or workspace access token](https://support.atlassian.com/bitbucket-cloud/docs/access-tokens/) passed via `BITBUCKET_ACCESS_TOKEN`.
+> Scope filtering does not hide write actions. A read-only token still exposes `create`, `delete`, `merge`, `write_file`, `trigger` and the other write actions inside the multiplexed `manage_*` tools; they fail at the API instead. The credential is what limits an agent, so use **least-privilege credentials** for agent setups, ideally a Bitbucket [repository or workspace access token](https://support.atlassian.com/bitbucket-cloud/docs/access-tokens/) passed via `BITBUCKET_ACCESS_TOKEN`. Repository and workspace access tokens are not tied to a user; if introspection fails for one and startup is refused, set `BBKT_SKIP_SCOPE_CHECK=1`. Every tool is then registered, and Bitbucket still enforces the token's own permissions.
 
 To remove tools outright, regardless of scopes:
 

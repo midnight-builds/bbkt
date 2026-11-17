@@ -39,7 +39,7 @@ bbkt mcp --port 8080 --host 0.0.0.0 --allow-remote
 A read-only credential still exposes the write actions inside the multiplexed `manage_*` tools (`create`, `delete`, `merge`, `write_file`, `trigger`, ...). Those calls fail at the Bitbucket API rather than being hidden. What the agent can actually change is decided by the credential, so give agents **least-privilege credentials**, ideally a Bitbucket [repository or workspace access token](https://support.atlassian.com/bitbucket-cloud/docs/access-tokens/) limited to the repos and scopes they need, passed via `BITBUCKET_ACCESS_TOKEN`.
 :::
 
-If scope introspection fails at startup, the server refuses to start. Set `BBKT_SKIP_SCOPE_CHECK=1` to start anyway and register every tool.
+If scope introspection fails at startup, the server refuses to start. Set `BBKT_SKIP_SCOPE_CHECK=1` to start anyway; with no scope list to filter on, every tool is registered. This may be needed for repository and workspace access tokens, which are not tied to a user; Bitbucket still enforces the token's own permissions.
 
 **Explicit denial:** `BITBUCKET_DISABLED_TOOLS` (comma-separated) removes tools outright, regardless of scopes. Valid names are `manage_workspaces`, `manage_repositories`, `manage_refs`, `manage_commits`, `manage_pull_requests`, `manage_pr_comments`, `manage_source`, `manage_pipelines`, `manage_issues` and `bitbucket_api`. Unknown names are rejected at startup, so a typo cannot silently leave a tool enabled.
 

@@ -61,7 +61,9 @@ To select a non-default profile per client (e.g. a "work" config in one MCP host
 
 ### Least-privilege credentials for agents
 
-The MCP server only hides a tool when the credential lacks that tool's **read** scope. A read-only credential still exposes the write actions inside the multiplexed `manage_*` tools (they fail at the API instead), so the credential is the real boundary on what an agent can change. For agent setups, prefer a Bitbucket **repository or workspace access token** scoped to just the repos and permissions the agent needs, passed via `BITBUCKET_ACCESS_TOKEN`:
+The MCP server only hides a tool when the credential lacks that tool's **read** scope. A read-only credential still exposes the write actions inside the multiplexed `manage_*` tools (they fail at the API instead), so the credential is the real boundary on what an agent can change. For agent setups, prefer a Bitbucket **repository or workspace access token** scoped to just the repos and permissions the agent needs, passed via `BITBUCKET_ACCESS_TOKEN`. Repository and workspace access tokens are not tied to a user; if introspection fails for one and startup is refused, set `BBKT_SKIP_SCOPE_CHECK=1`. Every tool is then registered, and Bitbucket still enforces the token's own permissions.
+
+Example:
 
 ```json
 {
