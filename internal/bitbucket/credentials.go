@@ -443,6 +443,9 @@ func RemoveCredentials() error {
 // agent that should only look). WriteScopes add creating, merging, commenting
 // and triggering. Shared by the login guide and the auth error help so the
 // two never drift apart.
+// SecuringAgentsURL is the guide on scopes and branch protection for agents.
+const SecuringAgentsURL = "https://zach-snell.github.io/bbkt/guides/securing-agents/"
+
 var (
 	ReadOnlyScopes = []string{
 		"read:account", "read:user:bitbucket", "read:workspace:bitbucket",
@@ -517,12 +520,15 @@ func APITokenLogin(opts APITokenLoginOptions) error {
 		fmt.Println("   token\" button: Bitbucket rejects unscoped tokens), choose")
 		fmt.Println("   Bitbucket, and pick scopes:")
 		fmt.Println()
-		fmt.Println("   Read-only (enough to browse; recommended for AI agents and demos):")
+		fmt.Println("   Read (browse repos, PRs, pipelines; nothing can change):")
 		fmt.Print(scopeLines(ReadOnlyScopes))
-		fmt.Println("   To also create/merge PRs, comment, push files or run pipelines, add:")
+		fmt.Println("   Write (open/merge PRs, comment, commit files, delete branches,")
+		fmt.Println("   run pipelines; what most agent setups use):")
 		fmt.Print(scopeLines(WriteScopes))
 		fmt.Println()
-		fmt.Println("   bbkt hides tools the token's scopes can't use.")
+		fmt.Println("   Leave admin:* and delete:* scopes off unless you need them, and")
+		fmt.Println("   protect main/develop with Bitbucket branch restrictions:")
+		fmt.Println("   " + SecuringAgentsURL)
 		fmt.Println("3. Copy the token, then answer the prompts below.")
 		fmt.Println()
 	}
@@ -634,6 +640,10 @@ func printLoginSummary(creds *Credentials, displayName, active string) {
 		access = "unknown"
 	}
 	fmt.Printf("  Access:     %s\n", access)
+	if access == "read + write" {
+		fmt.Println("              (an agent using this profile can merge PRs and push to")
+		fmt.Println("              unprotected branches; see " + SecuringAgentsURL + ")")
+	}
 	if path, err := CredentialsPath(); err == nil {
 		fmt.Printf("  Stored in:  %s\n", path)
 	}

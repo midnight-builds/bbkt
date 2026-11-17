@@ -27,6 +27,10 @@ export default defineConfig({
 					],
 				},
 				{
+					label: 'Guides',
+					items: [{ label: 'Securing agent access', slug: 'guides/securing-agents' }],
+				},
+				{
 					label: 'Reference',
 					items: [
 						{ label: 'CLI Commands', slug: 'reference/cli' },

@@ -1,0 +1,51 @@
+---
+title: Securing agent access
+description: What an agent can do with your Bitbucket credential, and how to limit the damage if it does the wrong thing.
+---
+
+An agent using `bbkt mcp` can do anything the credential behind it can do. bbkt adds a few guard rails, but the real limits come from two places you control: **the token's scopes** and **your repository's branch restrictions**. How far to lock things down is your call; this page explains the trade-offs.
+
+## Know what a scope allows
+
+| Scope | What an agent can do with it |
+|---|---|
+| `read:*:bitbucket` | Read repos, files, PRs, comments, pipelines and logs. Nothing changes. |
+| `write:pullrequest:bitbucket` | Open, update, **approve, merge** and decline PRs; comment and resolve threads. |
+| `write:repository:bitbucket` | **Commit files directly to any unprotected branch, including `main`**; create and **delete branches**; create tags. |
+| `write:pipeline:bitbucket` | Trigger and stop pipelines, which can run deployments. |
+| `admin:repository:bitbucket`, `delete:*` | Change repository settings, **delete whole repositories**. |
+
+Most agent setups use read + write: that is what lets an agent open a PR, push fixes to its branch and reply to review comments. Read-only is the cautious option when an agent only needs to look.
+
+:::caution[Skip admin and delete scopes]
+Day-to-day agent work never needs `admin:*` or `delete:*` scopes. Leave them off unless you specifically want an agent to manage repository settings or delete repositories.
+:::
+
+## Protect your important branches
+
+Scopes are coarse: `write:repository` cannot be limited to feature branches. Bitbucket's branch restrictions can. In **Repository settings → Branch restrictions**, add a rule for `main`, `develop` and release branches (patterns such as `release/*` work):
+
+- **Prevent deletion** of the branch.
+- **Prevent rewriting history** (no force pushes).
+- **Prevent changes without a pull request**, so even a write-scoped token has to go through review instead of committing straight to `main`.
+- Under **merge checks**, require a **minimum number of approvals**, **passing builds**, and **resolved tasks** before merging. On Bitbucket Premium these checks can be enforced; on other plans they are shown as warnings.
+
+An agent that uses your token acts **as you**. If the only approval needed is "one approver" and you are that approver, the agent can satisfy it. Require approval from someone other than the account the agent uses, or give the agent its own identity (below).
+
+## Give the agent its own identity
+
+Instead of your personal API token, consider:
+
+- A **repository or workspace access token** (Repository/Workspace settings → Access tokens), passed to bbkt as `BITBUCKET_ACCESS_TOKEN`. It is not tied to a person, can be limited to one repository, and shows up separately in history.
+- A **separate Bitbucket account** for automation, logged in as its own bbkt profile (`bbkt auth --profile agent`, then `BBKT_PROFILE=agent` in the MCP server's `env`).
+
+Either way, branch restrictions can then treat the agent differently from you (for example, you can merge to `main` and the agent cannot), and the audit trail shows which changes the agent made.
+
+## What bbkt adds
+
+These help, but they are not a substitute for the controls above:
+
+- `BITBUCKET_DISABLED_TOOLS` removes whole tools (for example `manage_repositories,manage_pipelines`) from the MCP server.
+- The `bitbucket_api` passthrough only allows `GET`/`HEAD` unless you set `BBKT_API_ALLOW_WRITE=1`.
+- `bbkt repos delete` never guesses which repository to delete and needs `--yes` when nobody is at the keyboard.
+- The HTTP transport (`bbkt mcp --port`) listens on localhost only and requires a bearer token.

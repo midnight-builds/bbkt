@@ -90,7 +90,7 @@ Profiles live side by side; the first one you create is active. Use another with
 
 > **Important:** Bitbucket Cloud REST API requires *scoped* API tokens since the September 2025 phase-2 of app-password deprecation. At [id.atlassian.com/manage-profile/security/api-tokens](https://id.atlassian.com/manage-profile/security/api-tokens), use the **"Create API token with scopes"** button — not plain "Create API token". Unscoped tokens authenticate to Atlassian but Bitbucket rejects them; bbkt will detect this and point you here.
 
-Read-only scopes (enough to browse; recommended for AI agents):
+Read scopes (browse repos, PRs and pipelines; nothing can change):
 
 ```
 read:account                 read:user:bitbucket
@@ -98,11 +98,13 @@ read:workspace:bitbucket     read:repository:bitbucket
 read:pullrequest:bitbucket   read:pipeline:bitbucket
 ```
 
-Add these to create/merge PRs, comment, push files or run pipelines:
+Add these to open and merge PRs, comment, commit files, delete branches and run pipelines (what most agent setups use):
 
 ```
 write:repository:bitbucket   write:pullrequest:bitbucket   write:pipeline:bitbucket
 ```
+
+Leave `admin:*` and `delete:*` scopes off unless you need them. A write-scoped token can merge PRs and commit to any unprotected branch, so protect `main`/`develop` with Bitbucket branch restrictions: see [Securing agent access](https://zach-snell.github.io/bbkt/guides/securing-agents/).
 
 ### OAuth 2.0 (browser flow)
 
@@ -250,7 +252,7 @@ This serves the MCP Streamable Transport (SSE-based) on `127.0.0.1:8080`.
 The MCP server calls Bitbucket's `/user` endpoint at startup to introspect your token's granted scopes, then drops any tool whose **read** scope is missing (e.g. `manage_pipelines` without `pipeline`). If introspection fails, the server refuses to start; set `BBKT_SKIP_SCOPE_CHECK=1` to start anyway, in which case no scope filtering happens and every tool is registered.
 
 > [!IMPORTANT]
-> Scope filtering does not hide write actions. A read-only token still exposes `create`, `delete`, `merge`, `write_file`, `trigger` and the other write actions inside the multiplexed `manage_*` tools; they fail at the API instead. The credential is what limits an agent, so use **least-privilege credentials** for agent setups, ideally a Bitbucket [repository or workspace access token](https://support.atlassian.com/bitbucket-cloud/docs/access-tokens/) passed via `BITBUCKET_ACCESS_TOKEN`. Repository and workspace access tokens are not tied to a user; if introspection fails for one and startup is refused, set `BBKT_SKIP_SCOPE_CHECK=1`. Every tool is then registered, and Bitbucket still enforces the token's own permissions.
+> Scope filtering does not hide write actions. A read-only token still exposes `create`, `delete`, `merge`, `write_file`, `trigger` and the other write actions inside the multiplexed `manage_*` tools; they fail at the API instead. The credential is what limits an agent, so use **least-privilege credentials** for agent setups, ideally a Bitbucket [repository or workspace access token](https://support.atlassian.com/bitbucket-cloud/docs/access-tokens/) passed via `BITBUCKET_ACCESS_TOKEN`. Repository and workspace access tokens are not tied to a user; if introspection fails for one and startup is refused, set `BBKT_SKIP_SCOPE_CHECK=1`. Every tool is then registered, and Bitbucket still enforces the token's own permissions. For scope choices and Bitbucket branch protection, see [Securing agent access](https://zach-snell.github.io/bbkt/guides/securing-agents/).
 
 To remove tools outright, regardless of scopes:
 
