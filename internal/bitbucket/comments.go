@@ -39,35 +39,43 @@ func (c *Client) ListPRComments(args ListPRCommentsArgs) (*Paginated[PRComment],
 	return GetPaginated[PRComment](c, path)
 }
 
-// ListAllPRComments fetches every page of comments, following the paginated
-// `next` cursor, and returns them merged into a single result. Use when a PR
-// may carry more comments than one page (default page size 50).
+// maxCommentPages bounds ListAllPRComments so a huge or self-referential
+// `next` chain cannot run unbounded (matches the bitbucket_api passthrough cap).
+const maxCommentPages = 100
+
+// ListAllPRComments fetches every page of comments by following Bitbucket's
+// `next` URL (which carries the same query, including the resolution fields)
+// and returns them merged into a single result. The walk stops after
+// maxCommentPages pages or if a `next` URL repeats; in that case Next is left
+// set to the first unfetched page so callers can tell the result is partial.
 func (c *Client) ListAllPRComments(args ListPRCommentsArgs) (*Paginated[PRComment], error) {
-	page := args.Page
-	if page == 0 {
-		page = 1
+	first, err := c.ListPRComments(args)
+	if err != nil {
+		return nil, err
 	}
 
-	var all []PRComment
-	var last *Paginated[PRComment]
-	for {
-		args.Page = page
-		res, err := c.ListPRComments(args)
+	all := first.Values
+	next := first.Next
+	seen := map[string]bool{}
+	for pages := 1; next != "" && pages < maxCommentPages && !seen[next]; pages++ {
+		seen[next] = true
+		path, err := NormalizeAPIPath(next)
+		if err != nil {
+			return nil, fmt.Errorf("following comments pagination: %w", err)
+		}
+		res, err := GetPaginated[PRComment](c, path)
 		if err != nil {
 			return nil, err
 		}
 		all = append(all, res.Values...)
-		last = res
-		if res.Next == "" {
-			break
-		}
-		page++
+		next = res.Next
 	}
 
-	last.Values = all
-	last.Size = len(all)
-	last.Next = ""
-	return last, nil
+	first.Values = all
+	first.Size = len(all)
+	first.Next = next
+	first.Previous = ""
+	return first, nil
 }
 
 type CreatePRCommentArgs struct {

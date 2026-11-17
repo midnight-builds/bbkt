@@ -98,7 +98,7 @@ bbkt prs decline [workspace] [repo-slug] <pr-id>
 #### `bbkt prs comments`
 
 ```bash
-bbkt prs comments list [workspace] [repo-slug] <pr-id>
+bbkt prs comments list [workspace] [repo-slug] <pr-id> [--all]   # --all follows every page (up to 100)
 bbkt prs comments add [workspace] [repo-slug] <pr-id> -m <body> \
     [--file <path> --to <line> | --from <line>] [--parent <comment-id>]
 bbkt prs comments resolve [workspace] [repo-slug] <pr-id> <comment-id>

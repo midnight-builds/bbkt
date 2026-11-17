@@ -2,6 +2,7 @@ package bitbucket
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -243,5 +244,81 @@ func TestListAllPRComments_WalksPages(t *testing.T) {
 	}
 	if !got[2001] || !got[2002] {
 		t.Errorf("want comments 2001 (page 1) and 2002 (page 2), got %v", got)
+	}
+}
+
+// commentsPage writes a one-comment page whose next URL points at page n+1
+// (or at nextOverride when set).
+func commentsPage(w http.ResponseWriter, r *http.Request, nextOverride string) {
+	n := 1
+	_, _ = fmt.Sscanf(r.URL.Query().Get("page"), "%d", &n)
+	next := nextOverride
+	if next == "" {
+		next = fmt.Sprintf("https://api.bitbucket.org/2.0%s?pagelen=1&page=%d&fields=%%2Bvalues.resolution.user.display_name", r.URL.Path, n+1)
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"page": n, "pagelen": 1, "next": next,
+		"values": []map[string]any{{"id": n, "content": map[string]string{"raw": "c"}}},
+	})
+}
+
+func TestListAllPRComments_FollowsNextAndCaps(t *testing.T) {
+	var requests int
+	var lastQuery string
+	c := newBearerClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		lastQuery = r.URL.RawQuery
+		commentsPage(w, r, "")
+	})
+
+	res, err := c.ListAllPRComments(ListPRCommentsArgs{Workspace: "w", RepoSlug: "r", PRID: 1, Pagelen: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != maxCommentPages {
+		t.Errorf("requests = %d, want cap %d", requests, maxCommentPages)
+	}
+	if len(res.Values) != maxCommentPages {
+		t.Errorf("values = %d, want %d", len(res.Values), maxCommentPages)
+	}
+	if res.Next == "" {
+		t.Error("Next is empty after hitting the cap; a truncated result must keep the cursor")
+	}
+	if !strings.Contains(lastQuery, "fields=%2Bvalues.resolution") {
+		t.Errorf("followed page lost the resolution fields param: %q", lastQuery)
+	}
+}
+
+func TestListAllPRComments_StopsOnRepeatedNext(t *testing.T) {
+	var requests int
+	c := newBearerClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		commentsPage(w, r, "https://api.bitbucket.org/2.0/repositories/w/r/pullrequests/1/comments?page=2")
+	})
+
+	res, err := c.ListAllPRComments(ListPRCommentsArgs{Workspace: "w", RepoSlug: "r", PRID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 {
+		t.Errorf("requests = %d, want 2 (first page + one follow, then loop detected)", requests)
+	}
+	if res.Next == "" {
+		t.Error("Next is empty after a loop stop; the result is partial")
+	}
+}
+
+func TestListAllPRComments_RejectsForeignNextHost(t *testing.T) {
+	var requests int
+	c := newBearerClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		commentsPage(w, r, "https://evil.example/2.0/steal")
+	})
+
+	if _, err := c.ListAllPRComments(ListPRCommentsArgs{Workspace: "w", RepoSlug: "r", PRID: 1}); err == nil {
+		t.Fatal("expected an error for a next URL on another host")
+	}
+	if requests != 1 {
+		t.Errorf("requests = %d, want 1", requests)
 	}
 }

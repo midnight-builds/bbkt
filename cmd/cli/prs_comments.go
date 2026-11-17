@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 
 	"github.com/spf13/cobra"
@@ -59,6 +60,9 @@ var prCommentsListCmd = &cobra.Command{
 		}
 		if err != nil {
 			return err
+		}
+		if fetchAll && result.Next != "" {
+			fmt.Fprintf(os.Stderr, "warning: stopped after %d comments; more pages remain (next: %s)\n", len(result.Values), result.Next)
 		}
 
 		PrintOrJSON(cmd, result, func() {
@@ -232,7 +236,7 @@ func init() {
 	prCommentsCmd.AddCommand(prCommentsUnresolveCmd)
 
 	addPaginationFlags(prCommentsListCmd)
-	prCommentsListCmd.Flags().Bool("all", false, "Fetch every comment page (follows pagination)")
+	prCommentsListCmd.Flags().Bool("all", false, "Fetch every comment page by following pagination (up to 100 pages)")
 
 	prCommentsAddCmd.Flags().StringP("content", "m", "", "Comment body (markdown supported)")
 	prCommentsAddCmd.Flags().Int("parent", 0, "Reply to this comment ID (creates a threaded reply)")
