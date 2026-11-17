@@ -55,8 +55,13 @@ func (c *Client) GetPipeline(args GetPipelineArgs) (*Pipeline, error) {
 		return nil, fmt.Errorf("workspace, repo_slug, and pipeline_uuid are required")
 	}
 
+	pipe, err := pathSegment("pipeline_uuid", args.PipelineUUID)
+	if err != nil {
+		return nil, err
+	}
+
 	return GetJSON[Pipeline](c, fmt.Sprintf("/repositories/%s/%s/pipelines/%s",
-		QueryEscape(args.Workspace), QueryEscape(args.RepoSlug), args.PipelineUUID))
+		QueryEscape(args.Workspace), QueryEscape(args.RepoSlug), pipe))
 }
 
 type TriggerPipelineArgs struct {
@@ -121,8 +126,12 @@ func (c *Client) StopPipeline(args StopPipelineArgs) error {
 
 	// Empty body + JSON Content-Type 400s on Bitbucket; send {} like the
 	// other body-less action endpoints (resolve/approve/decline).
-	_, err := c.Post(fmt.Sprintf("/repositories/%s/%s/pipelines/%s/stopPipeline",
-		QueryEscape(args.Workspace), QueryEscape(args.RepoSlug), args.PipelineUUID), map[string]interface{}{})
+	pipe, err := pathSegment("pipeline_uuid", args.PipelineUUID)
+	if err != nil {
+		return err
+	}
+	_, err = c.Post(fmt.Sprintf("/repositories/%s/%s/pipelines/%s/stopPipeline",
+		QueryEscape(args.Workspace), QueryEscape(args.RepoSlug), pipe), map[string]interface{}{})
 	return err
 }
 
@@ -138,8 +147,13 @@ func (c *Client) ListPipelineSteps(args ListPipelineStepsArgs) (*Paginated[Pipel
 		return nil, fmt.Errorf("workspace, repo_slug, and pipeline_uuid are required")
 	}
 
+	pipe, err := pathSegment("pipeline_uuid", args.PipelineUUID)
+	if err != nil {
+		return nil, err
+	}
+
 	return GetPaginated[PipelineStep](c, fmt.Sprintf("/repositories/%s/%s/pipelines/%s/steps",
-		QueryEscape(args.Workspace), QueryEscape(args.RepoSlug), args.PipelineUUID))
+		QueryEscape(args.Workspace), QueryEscape(args.RepoSlug), pipe))
 }
 
 type GetPipelineStepLogArgs struct {
@@ -155,7 +169,16 @@ func (c *Client) GetPipelineStepLog(args GetPipelineStepLogArgs) ([]byte, error)
 		return nil, fmt.Errorf("workspace, repo_slug, pipeline_uuid, and step_uuid are required")
 	}
 
+	pipe, err := pathSegment("pipeline_uuid", args.PipelineUUID)
+	if err != nil {
+		return nil, err
+	}
+	step, err := pathSegment("step_uuid", args.StepUUID)
+	if err != nil {
+		return nil, err
+	}
+
 	raw, _, err := c.GetRaw(fmt.Sprintf("/repositories/%s/%s/pipelines/%s/steps/%s/log",
-		QueryEscape(args.Workspace), QueryEscape(args.RepoSlug), args.PipelineUUID, args.StepUUID))
+		QueryEscape(args.Workspace), QueryEscape(args.RepoSlug), pipe, step))
 	return raw, err
 }

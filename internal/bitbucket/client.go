@@ -27,10 +27,13 @@ type Client struct {
 	// OAuth credentials for auto-refresh
 	oauthCreds *Credentials
 
-	// Cached scopes
+	// Cached scopes, guarded by scopesMu (separate from mu because Scopes
+	// performs requests, which take mu to read the token).
+	scopesMu       sync.Mutex
 	apiTokenScopes []string
 	scopesFetched  bool
 
+	// mu guards token and oauthCreds.
 	mu sync.Mutex
 }
 
@@ -66,31 +69,44 @@ func NewClientFromCredentials(creds *Credentials) *Client {
 	return c
 }
 
-// ensureValidToken checks if the OAuth token is expired and refreshes if needed.
-func (c *Client) ensureValidToken() error {
-	if c.oauthCreds == nil {
-		return nil
-	}
-
+// ensureValidToken checks if the OAuth token is expired and refreshes if
+// needed. It returns the bearer token to use, captured under the lock so
+// concurrent refreshes cannot race with readers.
+func (c *Client) ensureValidToken() (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if !c.oauthCreds.IsExpired() {
-		return nil
+	if c.oauthCreds == nil || !c.oauthCreds.IsExpired() {
+		return c.token, nil
 	}
 
 	if err := RefreshOAuth(c.oauthCreds); err != nil {
-		return fmt.Errorf("refreshing token: %w", err)
+		return "", fmt.Errorf("refreshing token: %w", err)
 	}
 
 	c.token = c.oauthCreds.AccessToken
-	return nil
+	return c.token, nil
+}
+
+// canRefresh reports whether OAuth credentials with a refresh token exist.
+func (c *Client) canRefresh() bool {
+	if c.oauthCreds == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.oauthCreds.RefreshToken != ""
 }
 
 // do executes an HTTP request with auth headers.
 // An optional accept parameter overrides the default "application/json" Accept header.
 func (c *Client) do(method, path string, bodyData []byte, contentType string, accept ...string) (*http.Response, error) {
-	if err := c.ensureValidToken(); err != nil {
+	if err := rejectDotSegments(path); err != nil {
+		return nil, err
+	}
+
+	token, err := c.ensureValidToken()
+	if err != nil {
 		return nil, err
 	}
 
@@ -111,8 +127,8 @@ func (c *Client) do(method, path string, bodyData []byte, contentType string, ac
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	} else if c.username != "" && c.password != "" {
 		req.SetBasicAuth(c.username, c.password)
 	}
@@ -128,12 +144,13 @@ func (c *Client) do(method, path string, bodyData []byte, contentType string, ac
 	}
 
 	// Auto-retry once on 401 if we have OAuth with a refresh token
-	if resp.StatusCode == http.StatusUnauthorized && c.oauthCreds != nil && c.oauthCreds.RefreshToken != "" {
+	if resp.StatusCode == http.StatusUnauthorized && c.canRefresh() {
 		resp.Body.Close()
 		c.mu.Lock()
 		c.oauthCreds.CreatedAt = time.Time{} // force expiry
 		c.mu.Unlock()
-		if err := c.ensureValidToken(); err != nil {
+		newToken, err := c.ensureValidToken()
+		if err != nil {
 			return nil, fmt.Errorf("refreshing after 401: %w", err)
 		}
 
@@ -146,7 +163,7 @@ func (c *Client) do(method, path string, bodyData []byte, contentType string, ac
 		if err != nil {
 			return nil, fmt.Errorf("creating retry request: %w", err)
 		}
-		req2.Header.Set("Authorization", "Bearer "+c.token)
+		req2.Header.Set("Authorization", "Bearer "+newToken)
 		if contentType != "" {
 			req2.Header.Set("Content-Type", contentType)
 		}
@@ -199,15 +216,21 @@ func (c *Client) GetWithScopes(path string) (body []byte, scopes string, err err
 
 // Scopes dynamically fetches and returns the token scopes by calling the API if not already cached.
 func (c *Client) Scopes() ([]string, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.scopesMu.Lock()
+	defer c.scopesMu.Unlock()
 
 	if c.scopesFetched {
 		return c.apiTokenScopes, nil
 	}
 
-	if c.oauthCreds != nil && c.oauthCreds.Scopes != "" {
-		c.apiTokenScopes = parseScopesString(c.oauthCreds.Scopes)
+	c.mu.Lock()
+	oauthScopes := ""
+	if c.oauthCreds != nil {
+		oauthScopes = c.oauthCreds.Scopes
+	}
+	c.mu.Unlock()
+	if oauthScopes != "" {
+		c.apiTokenScopes = parseScopesString(oauthScopes)
 		c.scopesFetched = true
 		return c.apiTokenScopes, nil
 	}

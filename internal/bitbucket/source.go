@@ -5,6 +5,29 @@ import (
 	"fmt"
 )
 
+// srcPath builds /repositories/{ws}/{repo}/src/{ref}/{path} with a validated
+// ref (default HEAD) and, when path is non-empty, a validated file path. With
+// an empty path the result ends at the ref (no trailing slash).
+func srcPath(workspace, repoSlug, ref, path string) (string, error) {
+	if ref == "" {
+		ref = "HEAD"
+	}
+	refSeg, err := pathSegment("ref", ref)
+	if err != nil {
+		return "", err
+	}
+	endpoint := fmt.Sprintf("/repositories/%s/%s/src/%s",
+		QueryEscape(workspace), QueryEscape(repoSlug), refSeg)
+	if path != "" {
+		p, err := pathMulti("path", path)
+		if err != nil {
+			return "", err
+		}
+		endpoint += "/" + p
+	}
+	return endpoint, nil
+}
+
 type GetFileContentArgs struct {
 	Workspace string `json:"workspace" jsonschema:"Workspace slug"`
 	RepoSlug  string `json:"repo_slug" jsonschema:"Repository slug"`
@@ -18,13 +41,9 @@ func (c *Client) GetFileContent(args GetFileContentArgs) (content []byte, conten
 		return nil, "", fmt.Errorf("workspace, repo_slug, and path are required")
 	}
 
-	var endpoint string
-	if args.Ref != "" {
-		endpoint = fmt.Sprintf("/repositories/%s/%s/src/%s/%s",
-			QueryEscape(args.Workspace), QueryEscape(args.RepoSlug), QueryEscape(args.Ref), args.Path)
-	} else {
-		endpoint = fmt.Sprintf("/repositories/%s/%s/src/HEAD/%s",
-			QueryEscape(args.Workspace), QueryEscape(args.RepoSlug), args.Path)
+	endpoint, err := srcPath(args.Workspace, args.RepoSlug, args.Ref, args.Path)
+	if err != nil {
+		return nil, "", err
 	}
 
 	return c.GetRaw(endpoint)
@@ -54,23 +73,12 @@ func (c *Client) ListDirectory(args ListDirectoryArgs) (*Paginated[TreeEntry], e
 		maxDepth = 1
 	}
 
-	var endpoint string
-	if args.Ref != "" {
-		if args.Path != "" {
-			endpoint = fmt.Sprintf("/repositories/%s/%s/src/%s/%s",
-				QueryEscape(args.Workspace), QueryEscape(args.RepoSlug), QueryEscape(args.Ref), args.Path)
-		} else {
-			endpoint = fmt.Sprintf("/repositories/%s/%s/src/%s/",
-				QueryEscape(args.Workspace), QueryEscape(args.RepoSlug), QueryEscape(args.Ref))
-		}
-	} else {
-		if args.Path != "" {
-			endpoint = fmt.Sprintf("/repositories/%s/%s/src/HEAD/%s",
-				QueryEscape(args.Workspace), QueryEscape(args.RepoSlug), args.Path)
-		} else {
-			endpoint = fmt.Sprintf("/repositories/%s/%s/src/HEAD/",
-				QueryEscape(args.Workspace), QueryEscape(args.RepoSlug))
-		}
+	endpoint, err := srcPath(args.Workspace, args.RepoSlug, args.Ref, args.Path)
+	if err != nil {
+		return nil, err
+	}
+	if args.Path == "" {
+		endpoint += "/"
 	}
 
 	endpoint += fmt.Sprintf("?pagelen=%d&max_depth=%d", pagelen, maxDepth)
@@ -101,8 +109,17 @@ func (c *Client) GetFileHistory(args GetFileHistoryArgs) (*Paginated[json.RawMes
 		pagelen = 25
 	}
 
+	refSeg, err := pathSegment("ref", ref)
+	if err != nil {
+		return nil, err
+	}
+	filePath, err := pathMulti("path", args.Path)
+	if err != nil {
+		return nil, err
+	}
+
 	endpoint := fmt.Sprintf("/repositories/%s/%s/filehistory/%s/%s?pagelen=%d",
-		QueryEscape(args.Workspace), QueryEscape(args.RepoSlug), QueryEscape(ref), args.Path, pagelen)
+		QueryEscape(args.Workspace), QueryEscape(args.RepoSlug), refSeg, filePath, pagelen)
 
 	// Filehistory returns commit objects with file metadata
 	return GetPaginated[json.RawMessage](c, endpoint)
