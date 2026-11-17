@@ -10,3 +10,6 @@ import "os"
 func lockFile(*os.File) error { return nil }
 
 func unlockFile(*os.File) error { return nil }
+
+// replaceFile atomically renames src over dst.
+func replaceFile(src, dst string) error { return os.Rename(src, dst) }

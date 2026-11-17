@@ -8,10 +8,12 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/x/term"
@@ -83,7 +85,10 @@ func CredentialsPath() (string, error) {
 	return filepath.Join(home, ".config", "bbkt", "credentials.json"), nil
 }
 
-// SaveProfileStore persists the entire ProfileStore to disk.
+// SaveProfileStore persists the entire ProfileStore to disk, replacing
+// whatever is there. It is a blind overwrite: changes another process made
+// since store was loaded are lost. To modify the store, use
+// UpdateProfileStore, which reads and writes under the credentials lock.
 func SaveProfileStore(store *ProfileStore) error {
 	path, err := CredentialsPath()
 	if err != nil {
@@ -266,7 +271,7 @@ func writeProfileStore(path string, store *ProfileStore) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("closing credentials file: %w", err)
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := replaceFile(tmpName, path); err != nil {
 		return fmt.Errorf("replacing credentials file: %w", err)
 	}
 	committed = true
@@ -506,7 +511,9 @@ func APITokenLogin(profileName string) error {
 // from reader.
 func readSecretLine(reader *bufio.Reader, in *os.File) (string, error) {
 	if reader.Buffered() == 0 && term.IsTerminal(in.Fd()) {
+		restore := restoreTerminalOnSignal(in.Fd())
 		b, err := term.ReadPassword(in.Fd())
+		restore()
 		fmt.Println()
 		if err != nil {
 			return "", err
@@ -514,6 +521,33 @@ func readSecretLine(reader *bufio.Reader, in *os.File) (string, error) {
 		return string(b), nil
 	}
 	return reader.ReadString('\n')
+}
+
+// restoreTerminalOnSignal guards a no-echo read: if the process is
+// interrupted (Ctrl-C) or terminated while echo is off, the terminal state is
+// restored before exiting, so the user's shell is not left without echo.
+// The returned func stops the guard once the read has finished.
+func restoreTerminalOnSignal(fd uintptr) (stop func()) {
+	state, err := term.GetState(fd)
+	if err != nil {
+		return func() {}
+	}
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-sigCh:
+			_ = term.Restore(fd, state)
+			fmt.Println()
+			os.Exit(130)
+		case <-done:
+		}
+	}()
+	return func() {
+		signal.Stop(sigCh)
+		close(done)
+	}
 }
 
 // FetchAccessibleWorkspaces retrieves all workspace slugs the client can access.

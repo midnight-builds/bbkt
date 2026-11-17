@@ -1,9 +1,14 @@
 package bitbucket
 
 import (
+	"bytes"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -265,5 +270,83 @@ func TestDo_401WithoutOAuth_DoesNotRetry(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("expected 1 call (no retry for Basic Auth), got %d", calls)
+	}
+}
+
+// If the refreshed token cannot be saved (here: the credentials file is a
+// symlink, which writes refuse), the client must still use the new token for
+// the rest of the process instead of resending the expired one.
+func TestEnsureValidToken_SaveFailureStillUsesNewToken(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs privileges on windows")
+	}
+	sandboxHome(t)
+	var buf bytes.Buffer
+	orig := stderrOut
+	stderrOut = &buf
+	t.Cleanup(func() { stderrOut = orig })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"new-bearer","token_type":"bearer","expires_in":3600}`))
+	}))
+	t.Cleanup(srv.Close)
+	withTokenEndpoint(t, srv)
+
+	path, err := CredentialsPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "target.json"), path); err != nil {
+		t.Fatal(err)
+	}
+
+	creds := &Credentials{
+		ProfileName:  "default",
+		AuthType:     AuthTypeOAuth,
+		AccessToken:  "expired-bearer",
+		RefreshToken: "refresh-tok",
+		ExpiresIn:    3600,
+		CreatedAt:    time.Now().Add(-2 * time.Hour),
+	}
+	c := NewClientFromCredentials(creds)
+
+	if err := c.ensureValidToken(); err != nil {
+		t.Fatalf("ensureValidToken returned %v, want nil when only the save failed", err)
+	}
+	if c.token != "new-bearer" {
+		t.Errorf("client token = %q, want new-bearer", c.token)
+	}
+	if !strings.Contains(buf.String(), "could not be saved") {
+		t.Errorf("expected a save warning on stderr, got %q", buf.String())
+	}
+}
+
+func TestRefreshOAuth_SaveFailureWrapsSentinel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs privileges on windows")
+	}
+	sandboxHome(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"new","expires_in":3600}`))
+	}))
+	t.Cleanup(srv.Close)
+	withTokenEndpoint(t, srv)
+
+	path, _ := CredentialsPath()
+	_ = os.MkdirAll(filepath.Dir(path), 0o700)
+	if err := os.Symlink(filepath.Join(t.TempDir(), "x"), path); err != nil {
+		t.Fatal(err)
+	}
+
+	creds := &Credentials{ProfileName: "default", AuthType: AuthTypeOAuth, RefreshToken: "r"}
+	err := RefreshOAuth(creds)
+	if !errors.Is(err, ErrTokenNotPersisted) {
+		t.Fatalf("err = %v, want ErrTokenNotPersisted", err)
+	}
+	if creds.AccessToken != "new" {
+		t.Errorf("creds not updated in place: %q", creds.AccessToken)
 	}
 }

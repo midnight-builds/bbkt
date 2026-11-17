@@ -71,18 +71,8 @@ var profileUseCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
-		store, err := bitbucket.LoadProfileStore()
-		if err != nil {
-			return fmt.Errorf("loading profiles: %w", err)
-		}
-
-		if _, ok := store.Profiles[name]; !ok {
-			return fmt.Errorf("profile %q not found (run 'bbkt profile' to list)", name)
-		}
-
-		store.ActiveProfile = name
-		if err := bitbucket.SaveProfileStore(store); err != nil {
-			return fmt.Errorf("saving profile: %w", err)
+		if err := setActiveProfile(name); err != nil {
+			return err
 		}
 
 		PrintOrJSON(cmd, map[string]any{"active_profile": name}, func() {
@@ -106,6 +96,10 @@ var profileRefreshCmd = &cobra.Command{
 			fmt.Println("Refreshing workspaces...")
 		}
 		results := make([]map[string]any, 0, len(store.Profiles))
+		// Network calls happen outside the credentials lock; only the
+		// fetched workspace lists are merged into a fresh read of the store,
+		// so concurrent logins or OAuth refreshes are not overwritten.
+		fetched := make(map[string][]string, len(store.Profiles))
 		for name, cred := range store.Profiles {
 			var client *bitbucket.Client
 			if cred.IsAPIToken() {
@@ -118,7 +112,7 @@ var profileRefreshCmd = &cobra.Command{
 			}
 			if client != nil {
 				slugs := bitbucket.FetchAccessibleWorkspaces(client)
-				cred.AccessibleWorkspaces = slugs
+				fetched[name] = slugs
 				results = append(results, map[string]any{"profile": name, "workspaces": len(slugs)})
 				if !asJSON {
 					fmt.Printf("  - %s: Found %d workspaces\n", name, len(slugs))
@@ -126,7 +120,7 @@ var profileRefreshCmd = &cobra.Command{
 			}
 		}
 
-		if err := bitbucket.SaveProfileStore(store); err != nil {
+		if err := mergeAccessibleWorkspaces(fetched); err != nil {
 			return fmt.Errorf("saving profiles: %w", err)
 		}
 		PrintOrJSON(cmd, map[string]any{"refreshed": results}, func() {
@@ -134,6 +128,33 @@ var profileRefreshCmd = &cobra.Command{
 		})
 		return nil
 	},
+}
+
+// setActiveProfile marks name as the active profile under the credentials
+// lock, failing if no such profile exists.
+func setActiveProfile(name string) error {
+	return bitbucket.UpdateProfileStore(func(store *bitbucket.ProfileStore) error {
+		if _, ok := store.Profiles[name]; !ok {
+			return fmt.Errorf("profile %q not found (run 'bbkt profile' to list)", name)
+		}
+		store.ActiveProfile = name
+		return nil
+	})
+}
+
+// mergeAccessibleWorkspaces writes freshly fetched workspace lists into the
+// current on-disk store under the credentials lock. Profiles removed since
+// the lists were fetched are skipped, and all other fields are left as they
+// are on disk.
+func mergeAccessibleWorkspaces(fetched map[string][]string) error {
+	return bitbucket.UpdateProfileStore(func(store *bitbucket.ProfileStore) error {
+		for name, slugs := range fetched {
+			if cred, ok := store.Profiles[name]; ok {
+				cred.AccessibleWorkspaces = slugs
+			}
+		}
+		return nil
+	})
 }
 
 func init() {

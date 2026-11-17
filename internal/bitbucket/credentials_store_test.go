@@ -352,3 +352,56 @@ func TestReadSecretLine_PipeReadsPlainLine(t *testing.T) {
 		t.Errorf("readSecretLine = %q, want %q", got, "s3cret-token\n")
 	}
 }
+
+// A legacy single-credential file is migrated to the profile format on load.
+func TestLoadProfileStore_MigratesLegacyFile(t *testing.T) {
+	path := isolatedCredsPath(t)
+	writeRaw(t, path, `{"auth_type":"api_token","email":"me@example.com","api_token":"tok"}`, 0o600)
+
+	store, err := LoadProfileStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.ActiveProfile != "default" || store.Profiles["default"] == nil || store.Profiles["default"].Email != "me@example.com" {
+		t.Fatalf("migrated store = %+v", store)
+	}
+
+	disk := loadOnDisk(t, path)
+	if disk.ActiveProfile != "default" || disk.Profiles["default"] == nil || disk.Profiles["default"].APIToken != "tok" {
+		t.Errorf("on-disk file not migrated: %+v", disk)
+	}
+}
+
+// Migration on load must not clobber profiles saved concurrently, and must
+// not deadlock against writers holding the lock.
+func TestLoadProfileStore_LegacyMigrationRacesWithSaves(t *testing.T) {
+	path := isolatedCredsPath(t)
+	writeRaw(t, path, `{"auth_type":"api_token","email":"me@example.com","api_token":"tok"}`, 0o600)
+
+	const n = 10
+	names := []string{"default"}
+	var wg sync.WaitGroup
+	errs := make(chan error, 2*n)
+	for i := range n {
+		name := fmt.Sprintf("p%d", i)
+		names = append(names, name)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			errs <- SaveProfile(&Credentials{ProfileName: name, AuthType: AuthTypeAPIToken})
+		}()
+		go func() {
+			defer wg.Done()
+			_, err := LoadProfileStore()
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertAllProfiles(t, path, names)
+}

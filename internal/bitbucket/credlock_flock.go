@@ -22,3 +22,6 @@ func lockFile(f *os.File) error {
 func unlockFile(f *os.File) error {
 	return syscall.Flock(int(f.Fd()), syscall.LOCK_UN) // #nosec G115 -- a file descriptor always fits in int
 }
+
+// replaceFile atomically renames src over dst.
+func replaceFile(src, dst string) error { return os.Rename(src, dst) }
