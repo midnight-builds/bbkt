@@ -10,6 +10,9 @@
 #    string, or any term listed in $BBKT_DEMO_BLOCKLIST (comma-separated, e.g.
 #    company or client names).
 # 3. Runs vhs.
+#
+# Set BBKT_DEMO_BIN to record a specific build (e.g. the one about to ship)
+# instead of the bbkt on PATH.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -22,8 +25,15 @@ cmds=()
 while IFS= read -r line; do cmds+=("$line"); done < <(sed -n 's/^Type "\(bbkt .*\)"$/\1/p' "$tape")
 [ "${#cmds[@]}" -gt 0 ] || { echo "no commands found in demo.tape" >&2; exit 1; }
 
-out="$(mktemp)"; tmp_home="$(mktemp -d)"
-trap 'rm -rf "$out" "$tmp_home"' EXIT
+out="$(mktemp)"; tmp_home="$(mktemp -d)"; tmp_bin="$(mktemp -d)"
+trap 'rm -rf "$out" "$tmp_home" "$tmp_bin"' EXIT
+if [ -n "${BBKT_DEMO_BIN:-}" ]; then
+  [ -x "$BBKT_DEMO_BIN" ] || { echo "BBKT_DEMO_BIN is not executable: $BBKT_DEMO_BIN" >&2; exit 1; }
+  ln -s "$(cd "$(dirname "$BBKT_DEMO_BIN")" && pwd)/$(basename "$BBKT_DEMO_BIN")" "$tmp_bin/bbkt"
+  export PATH="$tmp_bin:$PATH"
+  export BBKT_DEMO_PATH="$tmp_bin"
+fi
+echo "recording with: $(command -v bbkt) ($(bbkt --version))"
 mkdir -m 700 -p "$tmp_home/.config/bbkt"
 ( umask 077
   python3 -I - "$creds" "$profile" >"$tmp_home/.config/bbkt/credentials.json" <<'PY'

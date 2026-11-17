@@ -9,18 +9,16 @@
 Output demo.gif
 
 Set Shell zsh
-Set FontSize 16
-Set Width 950
-Set Height 600
+Set FontSize 15
+Set Width 1180
+Set Height 720
 Set Padding 20
 Set Theme "Catppuccin Mocha"
 Set TypingSpeed 40ms
 Set WindowBar Colorful
 
-Env PATH "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-
 Hide
-Type `[ -n "$BBKT_DEMO_HOME" ] || exit 1; export HOME="$BBKT_DEMO_HOME"; unset BBKT_PROFILE BBKT_WORKSPACE BBKT_REPO BITBUCKET_USERNAME BITBUCKET_API_TOKEN BITBUCKET_ACCESS_TOKEN BITBUCKET_OAUTH_CLIENT_ID BITBUCKET_OAUTH_CLIENT_SECRET; cd "$HOME"; PS1='$ '; clear`
+Type `[ -n "$BBKT_DEMO_HOME" ] || exit 1; [ -z "$BBKT_DEMO_PATH" ] || export PATH="$BBKT_DEMO_PATH:$PATH"; export HOME="$BBKT_DEMO_HOME"; unset BBKT_PROFILE BBKT_WORKSPACE BBKT_REPO BITBUCKET_USERNAME BITBUCKET_API_TOKEN BITBUCKET_ACCESS_TOKEN BITBUCKET_OAUTH_CLIENT_ID BITBUCKET_OAUTH_CLIENT_SECRET; cd "$HOME"; unsetopt PROMPT_SP 2>/dev/null; PS1='$ '; clear`
 Enter
 Show
 
@@ -29,24 +27,29 @@ Sleep 500ms
 Type "bbkt workspaces list"
 Sleep 400ms
 Enter
-Sleep 2s
-
-Type "bbkt repos list bbkt-test"
-Sleep 400ms
-Enter
-Sleep 2s
-
-Type "bbkt source tree bbkt-test bbkt"
-Sleep 400ms
-Enter
-Sleep 2s
-
-Type "bbkt prs list -R bbkt-test/bbkt --state ALL"
-Sleep 400ms
-Enter
-Sleep 2s
-
-Type "bbkt repos get bbkt-test bbkt"
-Sleep 400ms
-Enter
 Sleep 3s
+
+Type "bbkt prs list -R bbkt-test/bbkt"
+Sleep 400ms
+Enter
+Sleep 4.5s
+
+Hide
+Type "clear"
+Enter
+Show
+
+Type "bbkt prs comments list -R bbkt-test/bbkt 2"
+Sleep 400ms
+Enter
+Sleep 5s
+
+Hide
+Type "clear"
+Enter
+Show
+
+Type "bbkt source read -R bbkt-test/bbkt internal/bitbucket/retry.go --ref feat/retry-rate-limits"
+Sleep 400ms
+Enter
+Sleep 5s
