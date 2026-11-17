@@ -55,7 +55,7 @@ func (c *Client) GetPipeline(args GetPipelineArgs) (*Pipeline, error) {
 		return nil, fmt.Errorf("workspace, repo_slug, and pipeline_uuid are required")
 	}
 
-	pipe, err := pathSegment("pipeline_uuid", args.PipelineUUID)
+	pipe, err := pathUUID("pipeline_uuid", args.PipelineUUID)
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +126,7 @@ func (c *Client) StopPipeline(args StopPipelineArgs) error {
 
 	// Empty body + JSON Content-Type 400s on Bitbucket; send {} like the
 	// other body-less action endpoints (resolve/approve/decline).
-	pipe, err := pathSegment("pipeline_uuid", args.PipelineUUID)
+	pipe, err := pathUUID("pipeline_uuid", args.PipelineUUID)
 	if err != nil {
 		return err
 	}
@@ -147,7 +147,7 @@ func (c *Client) ListPipelineSteps(args ListPipelineStepsArgs) (*Paginated[Pipel
 		return nil, fmt.Errorf("workspace, repo_slug, and pipeline_uuid are required")
 	}
 
-	pipe, err := pathSegment("pipeline_uuid", args.PipelineUUID)
+	pipe, err := pathUUID("pipeline_uuid", args.PipelineUUID)
 	if err != nil {
 		return nil, err
 	}
@@ -169,11 +169,11 @@ func (c *Client) GetPipelineStepLog(args GetPipelineStepLogArgs) ([]byte, error)
 		return nil, fmt.Errorf("workspace, repo_slug, pipeline_uuid, and step_uuid are required")
 	}
 
-	pipe, err := pathSegment("pipeline_uuid", args.PipelineUUID)
+	pipe, err := pathUUID("pipeline_uuid", args.PipelineUUID)
 	if err != nil {
 		return nil, err
 	}
-	step, err := pathSegment("step_uuid", args.StepUUID)
+	step, err := pathUUID("step_uuid", args.StepUUID)
 	if err != nil {
 		return nil, err
 	}

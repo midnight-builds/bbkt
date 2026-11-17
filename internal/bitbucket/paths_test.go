@@ -3,9 +3,9 @@ package bitbucket
 import (
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestPathSegment(t *testing.T) {
@@ -17,7 +17,10 @@ func TestPathSegment(t *testing.T) {
 		{"main", "main", false},
 		{"{abcd-1234}", "%7Babcd-1234%7D", false},
 		{"feature/x", "feature%2Fx", false},
-		{"x/../../pullrequests/5/merge?", "x%2F..%2F..%2Fpullrequests%2F5%2Fmerge%3F", false},
+		{"x/../../pullrequests/5/merge?", "", true},
+		{"../../x", "", true},
+		{"a/..", "", true},
+		{"feature/..x", "feature%2F..x", false},
 		{"a b", "a%20b", false},
 		{"", "", true},
 		{".", "", true},
@@ -48,9 +51,10 @@ func TestPathMulti(t *testing.T) {
 		{"a/../b", "", true},
 		{"a/./b", "", true},
 		{"a/..", "", true},
-		{"a?b", "", true},
-		{"a#b", "", true},
-		{"a%2e%2e/b", "", true},
+		{"a?b", "a%3Fb", false},
+		{"docs/C#.md", "docs/C%23.md", false},
+		{"100%.txt", "100%25.txt", false},
+		{"a%2e%2e/b", "a%252e%252e/b", false},
 		{"a\nb", "", true},
 		{"a\x00b", "", true},
 	}
@@ -62,13 +66,34 @@ func TestPathMulti(t *testing.T) {
 	}
 }
 
+func TestPathUUID(t *testing.T) {
+	tests := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"{abcd-1234}", "%7Babcd-1234%7D", false},
+		{"x/../../pullrequests/5/merge?", "", true},
+		{"a/b", "", true},
+		{`a\b`, "", true},
+		{"..", "", true},
+		{"", "", true},
+	}
+	for _, tt := range tests {
+		got, err := pathUUID("x", tt.in)
+		if (err != nil) != tt.wantErr || got != tt.want {
+			t.Errorf("pathUUID(%q) = %q, %v; want %q err=%v", tt.in, got, err, tt.want, tt.wantErr)
+		}
+	}
+}
+
 func TestRejectDotSegments(t *testing.T) {
-	for _, p := range []string{"/a/../b", "/a/./b", "/a/%2e%2e/b", "/a/%2E", "/a/.."} {
+	for _, p := range []string{"/a/../b", "/a/./b", "/a/%2e%2e/b", "/a/%2E", "/a/..", "/a/x%2F..%2F..%2Fb/c", "/a/%2e%2e%2fb"} {
 		if rejectDotSegments(p) == nil {
 			t.Errorf("rejectDotSegments(%q) = nil, want error", p)
 		}
 	}
-	for _, p := range []string{"/a/b?x=../y", "/a/..b/c", "/a/b..c", "/repositories/w/r/diff/a..b"} {
+	for _, p := range []string{"/a/b?x=../y", "/a/..b/c", "/a/b..c", "/repositories/w/r/diff/a..b", "/a/feature%2Fx/b", "/a/x%2F..y"} {
 		if err := rejectDotSegments(p); err != nil {
 			t.Errorf("rejectDotSegments(%q) = %v", p, err)
 		}
@@ -103,9 +128,6 @@ func TestClientPaths_Escaped(t *testing.T) {
 			_, err := c.GetPipeline(GetPipelineArgs{Workspace: "w", RepoSlug: "r", PipelineUUID: "{ab-12}"})
 			return err
 		}, "/repositories/w/r/pipelines/%7Bab-12%7D"},
-		{"stop pipeline", func() error {
-			return c.StopPipeline(StopPipelineArgs{Workspace: "w", RepoSlug: "r", PipelineUUID: "x/../../pullrequests/5/merge?"})
-		}, "/repositories/w/r/pipelines/x%2F..%2F..%2Fpullrequests%2F5%2Fmerge%3F/stopPipeline"},
 		{"steps", func() error {
 			_, err := c.ListPipelineSteps(ListPipelineStepsArgs{Workspace: "w", RepoSlug: "r", PipelineUUID: "{p}"})
 			return err
@@ -142,6 +164,18 @@ func TestClientPaths_Escaped(t *testing.T) {
 			_, err := c.ListDirectory(ListDirectoryArgs{Workspace: "w", RepoSlug: "r", Ref: "main", Path: "a/b"})
 			return err
 		}, "/repositories/w/r/src/main/a/b"},
+		{"diff query chars escaped", func() error {
+			_, err := c.GetDiff(GetDiffArgs{Workspace: "w", RepoSlug: "r", Spec: "a?x=1"})
+			return err
+		}, "/repositories/w/r/diff/a%3Fx=1"},
+		{"diffstat percent escaped", func() error {
+			_, err := c.GetDiffStat(GetDiffStatArgs{Workspace: "w", RepoSlug: "r", Spec: "a%2f..%2fb"})
+			return err
+		}, "/repositories/w/r/diffstat/a%252f..%252fb"},
+		{"file with hash", func() error {
+			_, _, err := c.GetFileContent(GetFileContentArgs{Workspace: "w", RepoSlug: "r", Path: "docs/C#.md", Ref: "main"})
+			return err
+		}, "/repositories/w/r/src/main/docs/C%23.md"},
 		{"file history", func() error {
 			_, err := c.GetFileHistory(GetFileHistoryArgs{Workspace: "w", RepoSlug: "r", Path: "a/b c.go"})
 			return err
@@ -178,13 +212,15 @@ func TestClientPaths_TraversalRejected(t *testing.T) {
 			_, err := c.GetDiff(GetDiffArgs{Workspace: "w", RepoSlug: "r", Spec: "a/../../pullrequests/5"})
 			return err
 		},
-		"diff query": func() error {
-			_, err := c.GetDiff(GetDiffArgs{Workspace: "w", RepoSlug: "r", Spec: "a?x=1"})
+		"stop pipeline attack string": func() error {
+			return c.StopPipeline(StopPipelineArgs{Workspace: "w", RepoSlug: "r", PipelineUUID: "x/../../pullrequests/5/merge?"})
+		},
+		"pipeline slash": func() error {
+			_, err := c.GetPipeline(GetPipelineArgs{Workspace: "w", RepoSlug: "r", PipelineUUID: "a/b"})
 			return err
 		},
-		"diffstat percent": func() error {
-			_, err := c.GetDiffStat(GetDiffStatArgs{Workspace: "w", RepoSlug: "r", Spec: "a%2f..%2fb"})
-			return err
+		"delete branch encoded traversal": func() error {
+			return c.DeleteBranch(DeleteBranchArgs{Workspace: "w", RepoSlug: "r", Name: "../../x"})
 		},
 		"file traversal": func() error {
 			_, _, err := c.GetFileContent(GetFileContentArgs{Workspace: "w", RepoSlug: "r", Path: "../../x"})
@@ -220,25 +256,79 @@ func TestClientPaths_TraversalRejected(t *testing.T) {
 }
 
 func TestDo_ConcurrentRequests(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+	sandboxHome(t)
+
+	var mu sync.Mutex
+	var refreshes int
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		refreshes++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"fresh","refresh_token":"r2","expires_in":3600,"token_type":"bearer"}`))
+	}))
+	t.Cleanup(tokenSrv.Close)
+	withTokenEndpoint(t, tokenSrv)
+
+	var failOnce sync.Once
+	var badAuth []string
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		force := false
+		if r.URL.Path == "/once" {
+			failOnce.Do(func() { force = true })
+		}
+		if force {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
+		if auth != "Bearer fresh" {
+			mu.Lock()
+			badAuth = append(badAuth, auth)
+			mu.Unlock()
+		}
 		_, _ = w.Write([]byte("{}"))
 	}))
-	t.Cleanup(srv.Close)
-	c := NewClient("", "", "tok")
-	c.baseURL = srv.URL
+	t.Cleanup(apiSrv.Close)
+
+	creds := &Credentials{
+		ProfileName:  "default",
+		AuthType:     AuthTypeOAuth,
+		AccessToken:  "stale",
+		RefreshToken: "r1",
+		ClientID:     "cid",
+		ClientSecret: "csec",
+		ExpiresIn:    3600,
+		CreatedAt:    time.Now().Add(-2 * time.Hour), // expired
+	}
+	if err := SaveProfile(creds); err != nil {
+		t.Fatal(err)
+	}
+	c := NewClientFromCredentials(creds)
+	c.baseURL = apiSrv.URL
+
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
-		go func() {
+		go func(i int) {
 			defer wg.Done()
-			if _, err := c.Get("/x"); err != nil {
+			p := "/x"
+			if i == 0 {
+				p = "/once" // exercises the 401 retry path concurrently
+			}
+			if _, err := c.Get(p); err != nil {
 				t.Error(err)
 			}
-		}()
+		}(i)
 	}
 	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(badAuth) != 0 {
+		t.Errorf("requests carried a non-refreshed bearer token: %v", badAuth)
+	}
+	if refreshes == 0 {
+		t.Error("expected at least one token refresh")
+	}
 }

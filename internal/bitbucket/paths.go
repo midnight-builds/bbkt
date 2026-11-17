@@ -15,20 +15,42 @@ func pathSegment(name, v string) (string, error) {
 	if v == "" || v == "." || v == ".." {
 		return "", fmt.Errorf("invalid %s %q: must not be empty, '.' or '..'", name, v)
 	}
+	if hasDotPart(v) {
+		return "", fmt.Errorf("invalid %s %q: must not contain '.' or '..' path components", name, v)
+	}
 	return url.PathEscape(v), nil
+}
+
+// pathUUID validates and escapes an identifier that never legitimately
+// contains a path separator (pipeline and step UUIDs). On top of the
+// pathSegment checks it rejects '/' and '\\' outright, so the value cannot be
+// smuggled through as an encoded %2F sequence.
+func pathUUID(name, v string) (string, error) {
+	if strings.ContainsAny(v, `/\`) {
+		return "", fmt.Errorf("invalid %s %q: must not contain '/' or '\\'", name, v)
+	}
+	return pathSegment(name, v)
+}
+
+// hasDotPart reports whether any '/'-separated part of v is "." or "..".
+func hasDotPart(v string) bool {
+	for _, s := range strings.Split(v, "/") {
+		if s == "." || s == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // pathMulti validates and escapes a value that may span several path
 // segments, such as a file path ("a/b.go") or a diff spec ("main..feature",
-// "feature/x..main"). Any '/'-separated segment equal to "." or "..", any of
-// '?', '#', '%', and any control character is rejected. Each segment is then
-// escaped individually and rejoined with '/'. A trailing slash is preserved.
+// "feature/x..main"). Any '/'-separated segment equal to "." or ".." and any
+// control character is rejected. Each segment is then escaped individually
+// (so '?', '#' and '%' become %3F, %23 and %25) and rejoined with '/'. A
+// trailing slash is preserved.
 func pathMulti(name, v string) (string, error) {
 	if v == "" {
 		return "", fmt.Errorf("invalid %s: must not be empty", name)
-	}
-	if strings.ContainsAny(v, "?#%") {
-		return "", fmt.Errorf("invalid %s %q: must not contain '?', '#' or '%%'", name, v)
 	}
 	for _, r := range v {
 		if unicode.IsControl(r) {
@@ -46,7 +68,8 @@ func pathMulti(name, v string) (string, error) {
 }
 
 // rejectDotSegments is a last line of defence applied to every request path:
-// after percent-decoding, no path segment may be "." or "..".
+// after percent-decoding, no path segment (or '/'-separated part of one)
+// may be "." or "..".
 func rejectDotSegments(path string) error {
 	p := path
 	if i := strings.IndexAny(p, "?#"); i >= 0 {
@@ -57,7 +80,8 @@ func rejectDotSegments(path string) error {
 		if err != nil {
 			return fmt.Errorf("invalid request path: %w", err)
 		}
-		if d == "." || d == ".." {
+		// A decoded segment may itself contain '/' (from %2F); check each part.
+		if hasDotPart(d) {
 			return fmt.Errorf("invalid request path %q: dot segments are not allowed", path)
 		}
 	}
