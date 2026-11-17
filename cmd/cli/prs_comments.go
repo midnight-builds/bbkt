@@ -210,7 +210,9 @@ var prCommentsUnresolveCmd = &cobra.Command{
 			return err
 		}
 
-		fmt.Printf("Comment thread %d reopened (unresolved) successfully.\n", commentID)
+		PrintOrJSON(cmd, map[string]any{"id": commentID, "resolved": false}, func() {
+			fmt.Printf("Comment thread %d reopened (unresolved) successfully.\n", commentID)
+		})
 		return nil
 	},
 }
