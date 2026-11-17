@@ -10,14 +10,9 @@ Set Theme "Catppuccin Mocha"
 Set TypingSpeed 40ms
 Set WindowBar Colorful
 
-Env PATH "/tmp:/Users/zachsnell/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+Env PATH "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 
 Sleep 500ms
-
-Type "bbkt status"
-Sleep 400ms
-Enter
-Sleep 2s
 
 Type "bbkt workspaces list"
 Sleep 400ms

@@ -56,6 +56,31 @@ has_command() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# Compute SHA-256 of a file (sha256sum on Linux, shasum on macOS)
+sha256_of() {
+    if has_command sha256sum; then
+        sha256sum "$1" | awk '{print $1}'
+    elif has_command shasum; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        error "sha256sum or shasum is required to verify the download"
+    fi
+}
+
+# Verify FILE against the entry for NAME in the checksums file SUMS.
+# Fails closed: a missing entry or a mismatch aborts the install.
+verify_checksum() {
+    local file="$1" name="$2" sums="$3" expected actual
+    expected=$(awk -v n="$name" '{f=$2; sub(/^\*/, "", f); if (f == n) {print $1; exit}}' "$sums")
+    if [ -z "$expected" ]; then
+        error "No checksum entry for ${name} in checksums.txt; refusing to install"
+    fi
+    actual=$(sha256_of "$file")
+    if [ "$actual" != "$expected" ]; then
+        error "Checksum mismatch for ${name} (expected ${expected}, got ${actual}); refusing to install"
+    fi
+}
+
 # Main install
 main() {
     echo ""
@@ -99,6 +124,14 @@ main() {
         error "Download failed from $DOWNLOAD_URL"
     fi
 
+    # Verify integrity against the release's checksums.txt
+    CHECKSUMS_URL="https://github.com/${REPO}/releases/download/${VERSION}/checksums.txt"
+    if ! curl -fsSL "$CHECKSUMS_URL" -o "$TMP_DIR/checksums.txt"; then
+        error "Failed to download checksums.txt from $CHECKSUMS_URL"
+    fi
+    verify_checksum "$TMP_DIR/$BINARY_NAME" "$FILENAME" "$TMP_DIR/checksums.txt"
+    info "Checksum verified"
+
     # Make executable
     chmod +x "$TMP_DIR/$BINARY_NAME"
 
@@ -135,6 +168,11 @@ main() {
         echo "  ${INSTALL_DIR}/${BINARY_NAME}"
     fi
 }
+
+# Allow sourcing the functions (for tests) without running the installer
+if [ "${BBKT_INSTALL_SOURCE_ONLY:-}" = "1" ]; then
+    return 0 2>/dev/null || exit 0
+fi
 
 # Run with version flag
 if [ "$1" = "--version" ] || [ "$1" = "-v" ]; then

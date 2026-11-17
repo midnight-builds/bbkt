@@ -6,22 +6,23 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: "1.26"
-          check-latest: true
+          go-version-file: go.mod
 
       - name: Run tests
         run: go test -race ./...
@@ -55,15 +56,22 @@ jobs:
           cd dist
           sha256sum * > checksums.txt
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v3
-        with:
-          files: |
-            dist/*
-          generate_release_notes: true
-          draft: false
-
-      - name: Update latest tag
+      - name: Scan binaries for known vulnerabilities
         run: |
-          git tag -f latest
-          git push -f origin latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          status=0
+          for f in dist/bbkt-*; do
+            echo "::group::$f"
+            go version -m "$f"
+            if ! govulncheck -mode=binary "$f"; then
+              echo "::error::govulncheck found vulnerabilities in $f"
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $status
+
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes
