@@ -22,6 +22,7 @@ Set up credentials. Defaults to an Atlassian API token (Basic auth); use `--oaut
 bbkt auth                          # API token, "default" profile
 bbkt auth --profile work           # API token, "work" profile
 bbkt auth --oauth                  # OAuth 2.0 browser flow
+printf '%s\n' "$TOKEN" | bbkt auth --profile ci --email you@example.com --with-token   # no prompts
 ```
 
 ### `bbkt status`

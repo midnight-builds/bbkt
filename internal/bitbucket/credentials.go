@@ -395,7 +395,7 @@ func LoadCredentials() (*Credentials, error) {
 		if creds, ok := store.Profiles[override]; ok {
 			return creds, nil
 		}
-		return nil, fmt.Errorf("override profile '%s' not found in store", override)
+		return nil, fmt.Errorf("no profile named %q (see 'bbkt profile list', or create it with 'bbkt auth --profile %s')", override, override)
 	}
 
 	// 2. Magic Context Inference
@@ -439,56 +439,133 @@ func RemoveCredentials() error {
 	})
 }
 
-// APITokenLogin prompts the user for email + API Token and stores them.
-func APITokenLogin(profileName string) error {
+// ReadOnlyScopes are enough for every read action (and for a demo or an
+// agent that should only look). WriteScopes add creating, merging, commenting
+// and triggering. Shared by the login guide and the auth error help so the
+// two never drift apart.
+var (
+	ReadOnlyScopes = []string{
+		"read:account", "read:user:bitbucket", "read:workspace:bitbucket",
+		"read:repository:bitbucket", "read:pullrequest:bitbucket", "read:pipeline:bitbucket",
+	}
+	WriteScopes = []string{
+		"write:repository:bitbucket", "write:pullrequest:bitbucket", "write:pipeline:bitbucket",
+	}
+)
+
+// scopeLines formats scopes as indented, comma-separated lines of at most
+// three entries each.
+func scopeLines(scopes []string) string {
+	var b strings.Builder
+	for i := 0; i < len(scopes); i += 3 {
+		end := min(i+3, len(scopes))
+		b.WriteString("    " + strings.Join(scopes[i:end], ", "))
+		if end < len(scopes) {
+			b.WriteString(",")
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// APITokenLoginOptions configures APITokenLogin.
+type APITokenLoginOptions struct {
+	Profile string
+	// Email is the Atlassian account email. When empty it is prompted for.
+	Email string
+	// TokenFromStdin reads the token from the first line of stdin with no
+	// prompts or guide, for scripts and CI. Email must be set.
+	TokenFromStdin bool
+}
+
+// errNoTerminal explains how to log in when there is no keyboard to type on.
+func errNoTerminal(profile string) error {
+	return fmt.Errorf(`bbkt auth needs an interactive terminal to prompt for your email and token.
+Run it in a terminal, or pipe the token in:
+  printf '%%s\n' "$TOKEN" | bbkt auth --profile %s --email you@example.com --with-token`, profile)
+}
+
+// APITokenLogin verifies an Atlassian email + scoped API token against
+// Bitbucket and stores them under opts.Profile.
+func APITokenLogin(opts APITokenLoginOptions) error {
+	if opts.Profile == "" {
+		opts.Profile = "default"
+	}
 	reader := bufio.NewReader(os.Stdin)
+	interactive := !opts.TokenFromStdin
 
-	fmt.Println()
-	fmt.Println("Atlassian API Token Authentication (Basic Auth)")
-	fmt.Println("=============================================")
-	fmt.Println()
-	fmt.Println("Create an API Token at:")
-	fmt.Println("  https://id.atlassian.com/manage-profile/security/api-tokens")
-	fmt.Println()
-	fmt.Println("IMPORTANT: Use the \"Create API token with scopes\" button (NOT the")
-	fmt.Println("plain \"Create API token\" button). Bitbucket Cloud REST API requires")
-	fmt.Println("scoped tokens since Sep 2025 — unscoped tokens authenticate to")
-	fmt.Println("Atlassian but are rejected by Bitbucket's auth layer.")
-	fmt.Println()
-	fmt.Println("Recommended Scopes:")
-	fmt.Println("  read:account, read:user:bitbucket, read:workspace:bitbucket,")
-	fmt.Println("  read:repository:bitbucket, write:repository:bitbucket,")
-	fmt.Println("  read:pullrequest:bitbucket, write:pullrequest:bitbucket,")
-	fmt.Println("  read:pipeline:bitbucket, write:pipeline:bitbucket")
-	fmt.Println()
-	fmt.Println("Tools are dynamically disabled if your token omits specific scopes.")
-	fmt.Println("To explicitly deny the MCP server access to tools despite having full scopes, use:")
-	fmt.Printf("  export BITBUCKET_DISABLED_TOOLS=%q\n", DisabledToolsExample)
-	fmt.Println()
-
-	fmt.Print("Atlassian email: ")
-	email, err := reader.ReadString('\n')
-	if err != nil {
-		return fmt.Errorf("reading email: %w", err)
+	if opts.TokenFromStdin && opts.Email == "" {
+		return fmt.Errorf("--with-token needs --email (the Atlassian account email that owns the token)")
 	}
-	email = strings.TrimSpace(email)
+	if interactive && !term.IsTerminal(os.Stdin.Fd()) {
+		return errNoTerminal(opts.Profile)
+	}
+
+	if interactive {
+		fmt.Println()
+		fmt.Printf("Bitbucket login for profile %q (Atlassian API token)\n", opts.Profile)
+		fmt.Println("=============================================")
+		if store, err := LoadProfileStore(); err == nil {
+			if _, exists := store.Profiles[opts.Profile]; exists {
+				fmt.Printf("\nNote: profile %q already exists and will be replaced.\n", opts.Profile)
+			}
+		}
+		fmt.Println()
+		fmt.Println("1. Open https://id.atlassian.com/manage-profile/security/api-tokens")
+		fmt.Println("   signed in as the account you want this profile to use.")
+		fmt.Println("2. Click \"Create API token with scopes\" (not the plain \"Create API")
+		fmt.Println("   token\" button: Bitbucket rejects unscoped tokens), choose")
+		fmt.Println("   Bitbucket, and pick scopes:")
+		fmt.Println()
+		fmt.Println("   Read-only (enough to browse; recommended for AI agents and demos):")
+		fmt.Print(scopeLines(ReadOnlyScopes))
+		fmt.Println("   To also create/merge PRs, comment, push files or run pipelines, add:")
+		fmt.Print(scopeLines(WriteScopes))
+		fmt.Println()
+		fmt.Println("   bbkt hides tools the token's scopes can't use.")
+		fmt.Println("3. Copy the token, then answer the prompts below.")
+		fmt.Println()
+	}
+
+	email := strings.TrimSpace(opts.Email)
 	if email == "" {
-		return fmt.Errorf("email is required")
+		fmt.Print("Atlassian email: ")
+		line, err := reader.ReadString('\n')
+		if err != nil && !(errors.Is(err, io.EOF) && strings.TrimSpace(line) != "") {
+			return fmt.Errorf("reading email: %w", err)
+		}
+		email = strings.TrimSpace(line)
+		if email == "" {
+			return fmt.Errorf("email is required")
+		}
 	}
 
-	fmt.Print("API Token: ")
-	token, err := readSecretLine(reader, os.Stdin)
-	if err != nil {
-		return fmt.Errorf("reading API Token: %w", err)
+	var token string
+	if opts.TokenFromStdin {
+		line, err := reader.ReadString('\n')
+		if err != nil && !(errors.Is(err, io.EOF) && strings.TrimSpace(line) != "") {
+			return fmt.Errorf("reading token from stdin: %w", err)
+		}
+		token = line
+	} else {
+		fmt.Print("API token (input hidden): ")
+		t, err := readSecretLine(reader, os.Stdin)
+		if err != nil {
+			return fmt.Errorf("reading API token: %w", err)
+		}
+		token = t
 	}
 	token = strings.TrimSpace(token)
 	if token == "" {
-		return fmt.Errorf("API Token is required")
+		return fmt.Errorf("API token is required")
 	}
 
 	// Verify credentials by hitting the user API
-	fmt.Println("\nVerifying credentials...")
+	if interactive {
+		fmt.Println("\nVerifying with Bitbucket...")
+	}
 	client := NewClient(email, token, "")
+	displayName := ""
 	userData, scopesStr, err := client.GetWithScopes("/user")
 	if err != nil {
 		var authErr *AuthError
@@ -496,30 +573,28 @@ func APITokenLogin(profileName string) error {
 		case errors.As(err, &authErr) && authErr.IsClassicTokenRejection():
 			return fmt.Errorf("%s\n\n(underlying error: %w)", classicTokenHelp, err)
 		case errors.As(err, &authErr) && authErr.StatusCode == 403:
-			// 403 with X-OAuth-Scopes still populates scopesStr — proceed with
+			// 403 with X-OAuth-Scopes still populates scopesStr: proceed with
 			// the scopes we got, just skip the user-name lookup.
-			fmt.Println("\nToken verified (403 on /user — token has Bitbucket scopes but lacks read:account; user display name unavailable).")
+			displayName = "(name unavailable: token lacks read:account)"
 		default:
-			return fmt.Errorf("credential verification failed: %s\n\n(underlying error: %w)\n\nCheck that your email and API Token are correct", describeAuthFailure(err), err)
+			return fmt.Errorf("credential verification failed: %s\n\n(underlying error: %w)\n\nCheck that your email and API token are correct", describeAuthFailure(err), err)
 		}
 	}
-
 	if userData != nil {
 		var user struct {
 			DisplayName string `json:"display_name"`
 			Nickname    string `json:"nickname"`
 		}
 		if jsonErr := json.Unmarshal(userData, &user); jsonErr == nil {
-			name := user.DisplayName
-			if name == "" {
-				name = user.Nickname
+			displayName = user.DisplayName
+			if displayName == "" {
+				displayName = user.Nickname
 			}
-			fmt.Printf("Authenticated as: %s\n", name)
 		}
 	}
 
 	creds := &Credentials{
-		ProfileName:          profileName,
+		ProfileName:          opts.Profile,
 		AuthType:             AuthTypeAPIToken,
 		CreatedAt:            time.Now(),
 		Email:                email,
@@ -527,15 +602,50 @@ func APITokenLogin(profileName string) error {
 		Scopes:               scopesStr,
 		AccessibleWorkspaces: FetchAccessibleWorkspaces(client),
 	}
-
 	if err := SaveProfile(creds); err != nil {
 		return fmt.Errorf("saving profile: %w", err)
 	}
 
-	path, _ := CredentialsPath()
-	fmt.Printf("\nCredentials saved to: %s\n", path)
-	fmt.Println("You can now use the Bitbucket MCP server.")
+	active := ""
+	if store, err := LoadProfileStore(); err == nil {
+		active = store.ActiveProfile
+	}
+	printLoginSummary(creds, displayName, active)
 	return nil
+}
+
+// printLoginSummary tells the user what was saved and how to use it.
+func printLoginSummary(creds *Credentials, displayName, active string) {
+	fmt.Printf("\nSaved profile %q", creds.ProfileName)
+	if displayName != "" {
+		fmt.Printf(" (%s)", displayName)
+	}
+	fmt.Println()
+	if ws := creds.AccessibleWorkspaces; len(ws) > 0 {
+		fmt.Printf("  Workspaces: %s\n", strings.Join(ws, ", "))
+	} else {
+		fmt.Println("  Workspaces: none visible (token may lack read:workspace:bitbucket)")
+	}
+	access := "read-only"
+	if strings.Contains(creds.Scopes, "write:") {
+		access = "read + write"
+	}
+	if creds.Scopes == "" {
+		access = "unknown"
+	}
+	fmt.Printf("  Access:     %s\n", access)
+	if path, err := CredentialsPath(); err == nil {
+		fmt.Printf("  Stored in:  %s\n", path)
+	}
+	fmt.Println()
+	if active == creds.ProfileName {
+		fmt.Println("This is your active profile. Try: bbkt workspaces list")
+		return
+	}
+	fmt.Printf("Your active profile is still %q. To use this one:\n", active)
+	fmt.Printf("  bbkt --profile %s workspaces list    # one command\n", creds.ProfileName)
+	fmt.Printf("  bbkt profile use %s                  # make it the default\n", creds.ProfileName)
+	fmt.Printf("  BBKT_PROFILE=%s                      # in an MCP server's env\n", creds.ProfileName)
 }
 
 // readSecretLine reads one line of secret input. When in is a terminal (and

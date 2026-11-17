@@ -548,23 +548,22 @@ func parseAuthError(resp *http.Response, body []byte) error {
 // classicTokenHelp is the canonical user-facing explanation for the
 // classic-token-rejection fingerprint. Shared between login flow and
 // runtime scope introspection so we phrase it the same way everywhere.
-const classicTokenHelp = `Bitbucket rejected this token.
+// Bitbucket answers a mistyped token and an unscoped (classic) token the
+// same way, so both causes are named rather than guessing one.
+var classicTokenHelp = `Bitbucket rejected this email + token.
 
-Most likely cause: this is a *classic* Atlassian API token (created via
-the "Create API token" button at id.atlassian.com — no scopes selected).
-Bitbucket Cloud REST API requires scoped tokens since Sep 2025. Re-mint
-via "Create API token with scopes" and select at minimum:
-  read:account, read:workspace:bitbucket, read:repository:bitbucket
-For full read/write coverage also include:
-  write:repository:bitbucket, read:pullrequest:bitbucket,
-  write:pullrequest:bitbucket, read:pipeline:bitbucket,
-  write:pipeline:bitbucket
+Common causes:
+  - The token was pasted incompletely, or the email is not the Atlassian
+    account that owns the token.
+  - It is a classic (unscoped) token, made with the plain "Create API
+    token" button. Bitbucket only accepts tokens made with "Create API
+    token with scopes" (Bitbucket scopes).
+  - The token was revoked or has expired.
 
-(Classic tokens still work for Jira/Confluence — that's why the
-unscoped button is still in the Atlassian UI.)
-
-Other possible causes: token revoked or expired, or email does not
-match the Atlassian account that owns the token.`
+Create a new one at https://id.atlassian.com/manage-profile/security/api-tokens
+with "Create API token with scopes" -> Bitbucket. Read-only scopes:
+` + scopeLines(ReadOnlyScopes) + `To allow writes as well, add:
+` + strings.TrimSuffix(scopeLines(WriteScopes), "\n")
 
 // describeAuthFailure returns a user-friendly explanation for an auth
 // failure, branching on AuthError fingerprint. Returns the original error

@@ -8,7 +8,11 @@ import (
 	"github.com/zach-snell/bbkt/internal/bitbucket"
 )
 
-var useOAuth bool
+var (
+	useOAuth      bool
+	authEmail     string
+	authWithToken bool
+)
 
 var authCmd = &cobra.Command{
 	Use:     "auth",
@@ -32,7 +36,8 @@ Pass --profile to save under a named profile (e.g. "work") so you
 can switch with 'bbkt --profile work ...' or 'bbkt profile use work'.`,
 	Example: `  bbkt auth                          # API token, saved to "default" profile
   bbkt auth --profile work           # API token, saved to "work" profile
-  bbkt auth --oauth                  # OAuth 2.0 browser flow`,
+  bbkt auth --oauth                  # OAuth 2.0 browser flow
+  printf '%s\n' "$TOKEN" | bbkt auth --profile ci --email you@example.com --with-token`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Profile name comes from the persistent --profile flag (root.go);
 		// default to "default" when saving creds so we always write somewhere.
@@ -43,7 +48,11 @@ can switch with 'bbkt --profile work ...' or 'bbkt profile use work'.`,
 		if useOAuth {
 			return runOAuthLogin(profile)
 		}
-		if err := bitbucket.APITokenLogin(profile); err != nil {
+		if err := bitbucket.APITokenLogin(bitbucket.APITokenLoginOptions{
+			Profile:        profile,
+			Email:          authEmail,
+			TokenFromStdin: authWithToken,
+		}); err != nil {
 			return fmt.Errorf("auth failed: %w", err)
 		}
 		return nil
@@ -75,6 +84,9 @@ func init() {
 	RootCmd.AddCommand(logoutCmd)
 
 	authCmd.Flags().BoolVar(&useOAuth, "oauth", false, "Authenticate via OAuth 2.0 (opens browser)")
+	authCmd.Flags().StringVar(&authEmail, "email", "", "Atlassian account email (skips the email prompt)")
+	authCmd.Flags().BoolVar(&authWithToken, "with-token", false, "Read the API token from stdin, no prompts (needs --email); for scripts and CI")
+	authCmd.MarkFlagsMutuallyExclusive("oauth", "with-token")
 	// Note: --profile is inherited from RootCmd as a persistent flag and read in RunE.
 
 	// `bbkt auth status` and `bbkt auth logout` are natural things to type;

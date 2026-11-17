@@ -81,18 +81,27 @@ bbkt stores credentials at `~/.config/bbkt/credentials.json` and supports multip
 ```bash
 bbkt auth                  # save to "default" profile
 bbkt auth --profile work   # save to a named profile
+
+# no terminal (scripts, CI): pipe the token in instead of typing it
+printf '%s\n' "$TOKEN" | bbkt auth --profile ci --email you@example.com --with-token
 ```
+
+Profiles live side by side; the first one you create is active. Use another with `bbkt --profile work …`, `bbkt profile use work`, or `BBKT_PROFILE=work` in an MCP server's environment.
 
 > **Important:** Bitbucket Cloud REST API requires *scoped* API tokens since the September 2025 phase-2 of app-password deprecation. At [id.atlassian.com/manage-profile/security/api-tokens](https://id.atlassian.com/manage-profile/security/api-tokens), use the **"Create API token with scopes"** button — not plain "Create API token". Unscoped tokens authenticate to Atlassian but Bitbucket rejects them; bbkt will detect this and point you here.
 
-Recommended scope set for full read/write:
+Read-only scopes (enough to browse; recommended for AI agents):
 
 ```
-read:account
-read:user:bitbucket          read:workspace:bitbucket
-read:repository:bitbucket    write:repository:bitbucket
-read:pullrequest:bitbucket   write:pullrequest:bitbucket
-read:pipeline:bitbucket      write:pipeline:bitbucket
+read:account                 read:user:bitbucket
+read:workspace:bitbucket     read:repository:bitbucket
+read:pullrequest:bitbucket   read:pipeline:bitbucket
+```
+
+Add these to create/merge PRs, comment, push files or run pipelines:
+
+```
+write:repository:bitbucket   write:pullrequest:bitbucket   write:pipeline:bitbucket
 ```
 
 ### OAuth 2.0 (browser flow)

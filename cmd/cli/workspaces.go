@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -99,7 +100,11 @@ func getClient() *bitbucket.Client {
 
 	creds, err := bitbucket.LoadCredentials()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Not authenticated. Run 'bbkt auth' first.\n")
+		if errors.Is(err, fs.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "Not authenticated. Run 'bbkt auth' first.\n")
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		}
 		os.Exit(1)
 	}
 
