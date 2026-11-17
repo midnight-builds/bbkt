@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Re-record demo.gif without leaking anything real.
 #
-# 1. Loads the demo account from $BBKT_DEMO_ENV (default ~/.config/bbkt-demo/env),
-#    which must export BITBUCKET_USERNAME and BITBUCKET_API_TOKEN for the
-#    throwaway demo account (a read-only scoped token is enough).
+# 1. Copies ONLY the demo profile ($BBKT_DEMO_PROFILE, default "demo"; create
+#    it with `bbkt auth --profile demo` using a read-only scoped token for the
+#    throwaway demo account) into an empty temp HOME, so no other stored
+#    profile is visible to the recording.
 # 2. Runs every command the tape types, with HOME pointed at an empty dir, and
 #    refuses to record if the output contains an email address, a token-shaped
 #    string, or any term listed in $BBKT_DEMO_BLOCKLIST (comma-separated, e.g.
@@ -12,8 +13,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-env_file="${BBKT_DEMO_ENV:-$HOME/.config/bbkt-demo/env}"
-[ -f "$env_file" ] || { echo "missing demo env file: $env_file" >&2; exit 1; }
+profile="${BBKT_DEMO_PROFILE:-demo}"
+creds="$HOME/.config/bbkt/credentials.json"
 tape="${BBKT_DEMO_TAPE:-demo.tape}"
 
 # Commands the tape types, one per line, read straight from the tape.
@@ -23,11 +24,22 @@ while IFS= read -r line; do cmds+=("$line"); done < <(sed -n 's/^Type "\(bbkt .*
 
 out="$(mktemp)"; tmp_home="$(mktemp -d)"
 trap 'rm -rf "$out" "$tmp_home"' EXIT
+mkdir -m 700 -p "$tmp_home/.config/bbkt"
+( umask 077
+  python3 -I - "$creds" "$profile" >"$tmp_home/.config/bbkt/credentials.json" <<'PY'
+import json, sys
+path, name = sys.argv[1], sys.argv[2]
+store = json.load(open(path))
+prof = (store.get("profiles") or {}).get(name)
+if not prof:
+    sys.exit(f"no '{name}' profile in {path}; create it with: bbkt auth --profile {name}")
+json.dump({"active_profile": name, "profiles": {name: prof}}, sys.stdout, indent=2)
+PY
+) || exit 1
+export BBKT_DEMO_HOME="$tmp_home"
 (
-  # shellcheck disable=SC1090
-  source "$env_file"
   export HOME="$tmp_home"
-  unset BBKT_PROFILE BBKT_WORKSPACE BBKT_REPO
+  unset BBKT_PROFILE BBKT_WORKSPACE BBKT_REPO BITBUCKET_USERNAME BITBUCKET_API_TOKEN BITBUCKET_ACCESS_TOKEN BITBUCKET_OAUTH_CLIENT_ID BITBUCKET_OAUTH_CLIENT_SECRET
   cd "$HOME"
   for c in "${cmds[@]}"; do
     echo "\$ $c"
