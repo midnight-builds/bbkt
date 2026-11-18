@@ -71,6 +71,26 @@ func TestClassicTokenHelp_UsesSharedScopeLists(t *testing.T) {
 	}
 }
 
+func TestDescribeAccess(t *testing.T) {
+	cases := []struct{ scopes, want string }{
+		{"", "unknown"},
+		{"read:account read:repository:bitbucket", "read-only"},
+		{"read:repository:bitbucket write:pullrequest:bitbucket", "read + write"},
+		{"read:repository:bitbucket delete:repository:bitbucket", "read + admin/delete"},
+		{"read:repository:bitbucket,admin:repository:bitbucket", "read + admin/delete"},
+		{"write:repository:bitbucket admin:repository:bitbucket", "read + write + admin/delete"},
+	}
+	for _, c := range cases {
+		got, note := describeAccess(c.scopes)
+		if got != c.want {
+			t.Errorf("describeAccess(%q) = %q, want %q", c.scopes, got, c.want)
+		}
+		if (got == "read-only" || got == "unknown") != (len(note) == 0) {
+			t.Errorf("describeAccess(%q): note %v does not match level %q", c.scopes, note, got)
+		}
+	}
+}
+
 func credentialsPathForTest(t *testing.T) string {
 	t.Helper()
 	p, err := CredentialsPath()

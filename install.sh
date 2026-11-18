@@ -143,12 +143,10 @@ main() {
     TARGET="${INSTALL_DIR}/${BINARY_NAME}"
     if [ -w "$INSTALL_DIR" ]; then
         mv "$TMP_DIR/$BINARY_NAME" "$TARGET"
-    elif [ -f "$TARGET" ] && [ -w "$TARGET" ]; then
-        # The directory is root-owned but the existing binary is ours:
-        # overwrite it in place instead of asking for sudo.
-        cp "$TMP_DIR/$BINARY_NAME" "$TARGET"
     else
-        info "Need sudo to install to ${INSTALL_DIR}"
+        # Replace with mv (never copy over the old file in place: that breaks
+        # a running "bbkt mcp" and macOS code signatures).
+        info "Need sudo to install to ${INSTALL_DIR} (or rerun with --user, or set INSTALL_DIR)"
         sudo mv "$TMP_DIR/$BINARY_NAME" "$TARGET"
     fi
     success "Installed to ${TARGET}"

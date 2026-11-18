@@ -632,17 +632,10 @@ func printLoginSummary(creds *Credentials, displayName, active string) {
 	} else {
 		fmt.Println("  Workspaces: none visible (token may lack read:workspace:bitbucket)")
 	}
-	access := "read-only"
-	if strings.Contains(creds.Scopes, "write:") {
-		access = "read + write"
-	}
-	if creds.Scopes == "" {
-		access = "unknown"
-	}
+	access, note := describeAccess(creds.Scopes)
 	fmt.Printf("  Access:     %s\n", access)
-	if access == "read + write" {
-		fmt.Println("              (an agent using this profile can merge PRs and push to")
-		fmt.Println("              unprotected branches; see " + SecuringAgentsURL + ")")
+	for _, line := range note {
+		fmt.Println("              " + line)
 	}
 	if path, err := CredentialsPath(); err == nil {
 		fmt.Printf("  Stored in:  %s\n", path)
@@ -656,6 +649,42 @@ func printLoginSummary(creds *Credentials, displayName, active string) {
 	fmt.Printf("  bbkt --profile %s workspaces list    # one command\n", creds.ProfileName)
 	fmt.Printf("  bbkt profile use %s                  # make it the default\n", creds.ProfileName)
 	fmt.Printf("  BBKT_PROFILE=%s                      # in an MCP server's env\n", creds.ProfileName)
+}
+
+// describeAccess summarizes what a token's scopes allow, plus a short
+// warning for anything beyond read access. Admin and delete scopes are
+// called out on their own: they are not "write:" scopes but are the most
+// destructive ones.
+func describeAccess(scopes string) (level string, note []string) {
+	if strings.TrimSpace(scopes) == "" {
+		return "unknown", nil
+	}
+	var write, admin bool
+	for _, s := range strings.FieldsFunc(scopes, func(r rune) bool { return r == ' ' || r == ',' }) {
+		switch {
+		case strings.HasPrefix(s, "write:"):
+			write = true
+		case strings.HasPrefix(s, "admin:"), strings.HasPrefix(s, "delete:"):
+			admin = true
+		}
+	}
+	switch {
+	case admin:
+		label := "read + admin/delete"
+		if write {
+			label = "read + write + admin/delete"
+		}
+		return label, []string{
+			"(an agent using this profile can change repository settings or",
+			"delete repositories; see " + SecuringAgentsURL + ")",
+		}
+	case write:
+		return "read + write", []string{
+			"(an agent using this profile can merge PRs and push to",
+			"unprotected branches; see " + SecuringAgentsURL + ")",
+		}
+	}
+	return "read-only", nil
 }
 
 // readSecretLine reads one line of secret input. When in is a terminal (and
