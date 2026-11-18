@@ -22,10 +22,11 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-info() { echo -e "${BLUE}==>${NC} $1"; }
-success() { echo -e "${GREEN}==>${NC} $1"; }
-warn() { echo -e "${YELLOW}==>${NC} $1"; }
-error() { echo -e "${RED}==>${NC} $1" >&2; exit 1; }
+# printf, not echo -e: under sh (e.g. "curl ... | sh") echo prints a literal -e.
+info() { printf '%b==>%b %s\n' "$BLUE" "$NC" "$1"; }
+success() { printf '%b==>%b %s\n' "$GREEN" "$NC" "$1"; }
+warn() { printf '%b==>%b %s\n' "$YELLOW" "$NC" "$1"; }
+error() { printf '%b==>%b %s\n' "$RED" "$NC" "$1" >&2; exit 1; }
 
 # Detect OS
 detect_os() {
@@ -84,9 +85,9 @@ verify_checksum() {
 # Main install
 main() {
     echo ""
-    echo -e "${GREEN}╔═══════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║     bbkt installer                    ║${NC}"
-    echo -e "${GREEN}╚═══════════════════════════════════════╝${NC}"
+    printf '%b%s%b\n' "$GREEN" "╔═══════════════════════════════════════╗" "$NC"
+    printf '%b%s%b\n' "$GREEN" "║     bbkt installer                    ║" "$NC"
+    printf '%b%s%b\n' "$GREEN" "╚═══════════════════════════════════════╝" "$NC"
     echo ""
 
     # Check for curl
@@ -139,23 +140,30 @@ main() {
     # Make executable
     chmod +x "$TMP_DIR/$BINARY_NAME"
 
-    # Check if we can write to install dir
+    TARGET="${INSTALL_DIR}/${BINARY_NAME}"
     if [ -w "$INSTALL_DIR" ]; then
-        mv "$TMP_DIR/$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"
-        success "Installed to ${INSTALL_DIR}/${BINARY_NAME}"
+        mv "$TMP_DIR/$BINARY_NAME" "$TARGET"
+    elif [ -f "$TARGET" ] && [ -w "$TARGET" ]; then
+        # The directory is root-owned but the existing binary is ours:
+        # overwrite it in place instead of asking for sudo.
+        cp "$TMP_DIR/$BINARY_NAME" "$TARGET"
     else
         info "Need sudo to install to ${INSTALL_DIR}"
-        sudo mv "$TMP_DIR/$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"
-        success "Installed to ${INSTALL_DIR}/${BINARY_NAME}"
+        sudo mv "$TMP_DIR/$BINARY_NAME" "$TARGET"
     fi
+    success "Installed to ${TARGET}"
 
     # Verify installation
     if has_command "$BINARY_NAME"; then
-        INSTALLED_PATH=$(which "$BINARY_NAME")
+        INSTALLED_PATH="$TARGET"
+        ON_PATH=$(command -v "$BINARY_NAME")
         success "Installation complete!"
         echo ""
-        echo -e "  Binary:  ${GREEN}${INSTALLED_PATH}${NC}"
-        echo -e "  Version: ${GREEN}${VERSION}${NC}"
+        printf '  Binary:  %b%s%b\n' "$GREEN" "$INSTALLED_PATH" "$NC"
+        printf '  Version: %b%s%b\n' "$GREEN" "$VERSION" "$NC"
+        if [ "$ON_PATH" != "$TARGET" ]; then
+            warn "'${BINARY_NAME}' on your PATH is ${ON_PATH}, not ${TARGET}"
+        fi
         echo ""
         echo "  Next steps:"
         echo "  1. Authenticate:  ${BINARY_NAME} auth           (Atlassian API token, default)"
