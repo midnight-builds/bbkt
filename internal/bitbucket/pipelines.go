@@ -1,8 +1,11 @@
 package bitbucket
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"time"
 )
 
 type ListPipelinesArgs struct {
@@ -62,6 +65,73 @@ func (c *Client) GetPipeline(args GetPipelineArgs) (*Pipeline, error) {
 
 	return GetJSON[Pipeline](c, fmt.Sprintf("/repositories/%s/%s/pipelines/%s",
 		QueryEscape(args.Workspace), QueryEscape(args.RepoSlug), pipe))
+}
+
+// ErrWaitTimeout is returned by WaitPipeline when the run is still going at the deadline.
+var ErrWaitTimeout = errors.New("timed out waiting for pipeline")
+
+type WaitPipelineArgs struct {
+	GetPipelineArgs
+	Interval time.Duration // poll interval; default 15s
+	Timeout  time.Duration // 0 waits until ctx is done
+	// OnPoll is called after every successful poll; returning an error stops the wait.
+	OnPoll func(*Pipeline) error
+}
+
+// PipelineSettled reports whether a run will not change without outside action:
+// it has completed, or it is paused on a manual step.
+func PipelineSettled(p *Pipeline) bool {
+	if p == nil || p.State == nil {
+		return false
+	}
+	return p.State.Name == "COMPLETED" || (p.State.Stage != nil && p.State.Stage.Name == "PAUSED")
+}
+
+// WaitPipeline polls a pipeline run until it settles (see PipelineSettled).
+// On timeout it returns the last seen run together with ErrWaitTimeout.
+func (c *Client) WaitPipeline(ctx context.Context, args WaitPipelineArgs) (*Pipeline, error) {
+	interval := args.Interval
+	if interval <= 0 {
+		interval = 15 * time.Second
+	}
+	if args.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, args.Timeout)
+		defer cancel()
+	}
+
+	var last *Pipeline
+	failures := 0
+	for {
+		p, err := c.GetPipeline(args.GetPipelineArgs)
+		switch {
+		case err != nil:
+			// Long waits outlive the odd network blip; give up after 3 in a row.
+			if failures++; failures >= 3 {
+				return last, err
+			}
+		default:
+			failures = 0
+			last = p
+			if args.OnPoll != nil {
+				if err := args.OnPoll(p); err != nil {
+					return p, err
+				}
+			}
+			if PipelineSettled(p) {
+				return p, nil
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return last, ErrWaitTimeout
+			}
+			return last, ctx.Err()
+		case <-time.After(interval):
+		}
+	}
 }
 
 type TriggerPipelineArgs struct {
