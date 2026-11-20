@@ -379,7 +379,7 @@ step's log is printed. Exit status is 0 only for a SUCCESSFUL run.`,
 			Interval:        interval,
 			Timeout:         timeout,
 			OnPoll: func(p *bitbucket.Pipeline) error {
-				res, err := client.ListPipelineSteps(stepsArgs)
+				res, err := client.ListAllPipelineSteps(stepsArgs)
 				if err != nil {
 					return nil // step progress is best-effort; the run state drives the wait
 				}
