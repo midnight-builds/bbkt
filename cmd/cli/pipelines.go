@@ -366,10 +366,14 @@ func init() {
 // Only the first '=' splits, so values may contain '='.
 func parsePipelineVars(kvs []string, secured bool) ([]bitbucket.PipelineVariable, error) {
 	vars := make([]bitbucket.PipelineVariable, 0, len(kvs))
-	for _, kv := range kvs {
+	for i, kv := range kvs {
 		key, value, ok := strings.Cut(kv, "=")
 		key = strings.TrimSpace(key)
 		if !ok || key == "" {
+			if secured {
+				// Never echo a secured argument: it may hold the secret.
+				return nil, fmt.Errorf("invalid --secured-var #%d: want KEY=VALUE", i+1)
+			}
 			return nil, fmt.Errorf("invalid pipeline variable %q: want KEY=VALUE", kv)
 		}
 		vars = append(vars, bitbucket.PipelineVariable{Key: key, Value: value, Secured: secured})
