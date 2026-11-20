@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/zach-snell/bbkt/internal/bitbucket"
@@ -29,5 +30,13 @@ func TestParsePipelineVars(t *testing.T) {
 		if _, err := parsePipelineVars([]string{bad}, false); err == nil {
 			t.Errorf("parsePipelineVars(%q) should fail", bad)
 		}
+	}
+
+	_, err = parsePipelineVars([]string{"OK=1", "=s3cr3t-token"}, true)
+	if err == nil || strings.Contains(err.Error(), "s3cr3t") {
+		t.Fatalf("secured error must not echo the value: %v", err)
+	}
+	if !strings.Contains(err.Error(), "#2") {
+		t.Errorf("error should name the argument position: %v", err)
 	}
 }

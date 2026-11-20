@@ -108,7 +108,8 @@ func (c *Client) WaitPipeline(ctx context.Context, args WaitPipelineArgs) (*Pipe
 		switch {
 		case err != nil:
 			// Long waits outlive the odd network blip; give up after 3 in a row.
-			if failures++; failures >= 3 {
+			failures++
+			if failures >= 3 {
 				return last, err
 			}
 		default:
