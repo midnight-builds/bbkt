@@ -226,9 +226,24 @@ type PipeStage struct {
 
 // PipeTarget is the pipeline target.
 type PipeTarget struct {
-	Type    string `json:"type"`
-	RefType string `json:"ref_type"`
-	RefName string `json:"ref_name"`
+	Type     string            `json:"type"`
+	RefType  string            `json:"ref_type"`
+	RefName  string            `json:"ref_name"`
+	Selector *PipelineSelector `json:"selector,omitempty"`
+	Commit   *Commit           `json:"commit,omitempty"`
+}
+
+// PipelineName is the bitbucket-pipelines.yml entry the run came from: the
+// custom pipeline's name, or the selector type (default, branches, ...).
+func (t *PipeTarget) PipelineName() string {
+	switch {
+	case t == nil || t.Selector == nil:
+		return ""
+	case t.Selector.Type == "custom" && t.Selector.Pattern != "":
+		return t.Selector.Pattern
+	default:
+		return t.Selector.Type
+	}
 }
 
 // PipelineStep represents a single step in a pipeline.
@@ -306,9 +321,16 @@ type TriggerPipelineRequest struct {
 // PipeTriggerTarget specifies the pipeline trigger target.
 type PipeTriggerTarget struct {
 	Type     string            `json:"type"`
-	RefType  string            `json:"ref_type"`
-	RefName  string            `json:"ref_name"`
+	RefType  string            `json:"ref_type,omitempty"`
+	RefName  string            `json:"ref_name,omitempty"`
+	Commit   *PipeCommitRef    `json:"commit,omitempty"`
 	Selector *PipelineSelector `json:"selector,omitempty"`
+}
+
+// PipeCommitRef pins a pipeline trigger to a commit.
+type PipeCommitRef struct {
+	Type string `json:"type"`
+	Hash string `json:"hash"`
 }
 
 // PipelineSelector for custom pipelines.
@@ -319,9 +341,9 @@ type PipelineSelector struct {
 
 // PipelineVariable represents a pipeline variable.
 type PipelineVariable struct {
-	Key     string `json:"key"`
-	Value   string `json:"value"`
-	Secured bool   `json:"secured"`
+	Key     string `json:"key" jsonschema:"Variable name, e.g. FLAVOUR"`
+	Value   string `json:"value" jsonschema:"Variable value"`
+	Secured bool   `json:"secured,omitempty" jsonschema:"Mask the value in pipeline logs and the UI"`
 }
 
 // MergePRRequest is the body for merging a pull request.

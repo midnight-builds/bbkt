@@ -161,6 +161,7 @@ bbkt profile [use <name> | refresh]        # manage profiles
 bbkt workspaces [list | get <workspace>]
 bbkt repos     [list | get | create | delete]
                  [--query <q>] [--role <owner|admin|contributor|member>]
+bbkt downloads [list | get <file-name> [-o path]]   # repo Downloads (pipeline artifacts)
 
 # Pull requests (workspace/repo inferred from git)
 bbkt prs list                              # --state OPEN|MERGED|SUPERSEDED|DECLINED
@@ -174,8 +175,10 @@ bbkt prs comments [list | add | resolve | unresolve]   # --content, --parent, --
 # Pipelines
 bbkt pipelines list                        # --status SUCCESSFUL|FAILED|INPROGRESS
 bbkt pipelines get <pipeline-uuid>
-bbkt pipelines trigger --ref-name <branch> [--ref-type branch|tag|bookmark]
+bbkt pipelines trigger --ref-name <branch> [--ref-type branch|tag|bookmark] [--commit <hash>]
+bbkt pipelines trigger --ref-name main --pattern build --var FLAVOUR=release [--secured-var KEY=VALUE]
 bbkt pipelines stop <pipeline-uuid>
+bbkt pipelines watch <pipeline-uuid>      # follow until done; exit 0 only on SUCCESSFUL
 bbkt pipelines steps <pipeline-uuid>
 bbkt pipelines log <pipeline-uuid> <step-uuid>
 
@@ -295,13 +298,13 @@ When `BITBUCKET_ACCESS_TOKEN` *or* (`BITBUCKET_USERNAME` + `BITBUCKET_API_TOKEN`
 | Tool | Operations | Required Scope |
 |---|---|---|
 | `manage_workspaces` | list, get | — |
-| `manage_repositories` | list, get, create, delete | `repository` |
+| `manage_repositories` | list, get, create, delete, list-downloads | `repository` |
 | `manage_refs` | list, create, delete branches and tags | `repository` |
 | `manage_commits` | list, get, diff, diffstat | `repository` |
 | `manage_source` | read, list_directory, get_history, search, write, delete | `repository` |
 | `manage_pull_requests` | list, get, create, update, merge, approve, unapprove, decline, diff, diffstat, commits | `pullrequest` |
 | `manage_pr_comments` | list, create, update, delete, resolve, unresolve | `pullrequest` |
-| `manage_pipelines` | list, get, trigger, stop, list-steps, get-step-log | `pipeline` |
+| `manage_pipelines` | list, get, trigger, stop, wait, list-steps, get-step-log | `pipeline` |
 | `manage_issues` | list, get, create, update | `issue` |
 | `bitbucket_api` | any v2 endpoint; reads only unless `BBKT_API_ALLOW_WRITE=1` | — |
 

@@ -85,6 +85,13 @@ bbkt repos create [workspace] [repo-slug] [--description ...] [--private]
 bbkt repos delete <workspace> <repo-slug> [--yes]       # or <workspace/repo-slug>; never inferred
 ```
 
+### `bbkt downloads`
+
+```bash
+bbkt downloads list [workspace] [repo-slug]             # Downloads section, newest first
+bbkt downloads get [workspace] [repo-slug] <file-name> [-o path] [--force]
+```
+
 ### `bbkt prs`
 
 ```bash
@@ -111,8 +118,9 @@ bbkt prs comments unresolve [workspace] [repo-slug] <pr-id> <comment-id>
 ```bash
 bbkt pipelines list [workspace] [repo-slug]         # --status SUCCESSFUL|FAILED|INPROGRESS
 bbkt pipelines get [workspace] [repo-slug] <pipeline-uuid>
-bbkt pipelines trigger [workspace] [repo-slug] --ref-name <branch> [--ref-type branch|tag] [--pattern <custom-name>]
+bbkt pipelines trigger [workspace] [repo-slug] --ref-name <branch> [--ref-type branch|tag] [--pattern <custom-name>] [--commit <hash>] [--var KEY=VALUE]... [--secured-var KEY=VALUE]...
 bbkt pipelines stop [workspace] [repo-slug] <pipeline-uuid>
+bbkt pipelines watch [workspace] [repo-slug] <pipeline-uuid>   # --interval 15s --timeout 0 --log-lines 30; exit 0 only on SUCCESSFUL
 bbkt pipelines steps [workspace] [repo-slug] <pipeline-uuid>
 bbkt pipelines log [workspace] [repo-slug] <pipeline-uuid> <step-uuid>
 ```

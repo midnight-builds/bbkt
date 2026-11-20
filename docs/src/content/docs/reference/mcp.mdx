@@ -55,8 +55,9 @@ Get and list Bitbucket workspaces you have access to.
 
 ### `manage_repositories`
 Manage repositories across your workspaces.
-- **Actions:** `list`, `get`, `create`, `delete`
+- **Actions:** `list`, `get`, `create`, `delete`, `list-downloads`
 - **Optional params:** `role`, `language`, `is_private`, `project_key`
+- `list-downloads` lists the repository's Downloads (name, size, uploader, links), newest first
 - **Required scope:** `repository`
 
 ### `manage_refs`
@@ -91,7 +92,9 @@ Interact directly with your team inside active pull requests.
 
 ### `manage_pipelines`
 Trigger and monitor standard Bitbucket pipelines integration tests and deployments.
-- **Actions:** `list`, `get`, `trigger`, `stop`, `list-steps`, `get-step-log`
+- **Actions:** `list`, `get`, `trigger`, `stop`, `wait`, `list-steps`, `get-step-log`
+- **`trigger` options:** `ref_name`, `ref_type`, `pattern` (custom pipeline), `variables` (`[{"key": "FLAVOUR", "value": "release", "secured": false}]`)
+- `wait` blocks until the run completes or pauses on a manual step, up to `wait_seconds` (default 300, max 1800), then returns the run
 - **Required scope:** `pipeline`
 
 ### `manage_issues`

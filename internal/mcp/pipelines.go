@@ -4,24 +4,28 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/zach-snell/bbkt/internal/bitbucket"
 )
 
 type ManagePipelinesArgs struct {
-	Action       string `json:"action" jsonschema:"Action to perform: 'list', 'get', 'trigger', 'stop', 'list-steps', 'get-step-log'" jsonschema_enum:"list,get,trigger,stop,list-steps,get-step-log"`
-	Workspace    string `json:"workspace" jsonschema:"Workspace slug"`
-	RepoSlug     string `json:"repo_slug" jsonschema:"Repository slug"`
-	PipelineUUID string `json:"pipeline_uuid,omitempty" jsonschema:"Pipeline UUID"`
-	StepUUID     string `json:"step_uuid,omitempty" jsonschema:"Step UUID (for 'get-step-log')"`
-	RefType      string `json:"ref_type,omitempty" jsonschema:"Reference type: branch or tag (default branch) (for 'trigger')"`
-	RefName      string `json:"ref_name,omitempty" jsonschema:"Branch or tag name to run pipeline on (for 'trigger')"`
-	Pattern      string `json:"pattern,omitempty" jsonschema:"Custom pipeline pattern name to trigger (for 'trigger')"`
-	Page         int    `json:"page,omitempty" jsonschema:"Page number"`
-	Pagelen      int    `json:"pagelen,omitempty" jsonschema:"Results per page"`
-	Sort         string `json:"sort,omitempty" jsonschema:"Sort field"`
-	Status       string `json:"status,omitempty" jsonschema:"Filter by status"`
+	Action       string                       `json:"action" jsonschema:"Action to perform: 'list', 'get', 'trigger', 'stop', 'wait', 'list-steps', 'get-step-log'" jsonschema_enum:"list,get,trigger,stop,wait,list-steps,get-step-log"`
+	WaitSeconds  int                          `json:"wait_seconds,omitempty" jsonschema:"For 'wait': max seconds to block until the run completes or pauses (default 300, max 1800). On timeout the current run is returned; call again to keep waiting"`
+	Workspace    string                       `json:"workspace" jsonschema:"Workspace slug"`
+	RepoSlug     string                       `json:"repo_slug" jsonschema:"Repository slug"`
+	PipelineUUID string                       `json:"pipeline_uuid,omitempty" jsonschema:"Pipeline UUID"`
+	StepUUID     string                       `json:"step_uuid,omitempty" jsonschema:"Step UUID (for 'get-step-log')"`
+	RefType      string                       `json:"ref_type,omitempty" jsonschema:"Reference type: branch or tag (default branch) (for 'trigger')"`
+	RefName      string                       `json:"ref_name,omitempty" jsonschema:"Branch or tag name to run pipeline on (for 'trigger')"`
+	Pattern      string                       `json:"pattern,omitempty" jsonschema:"Custom pipeline pattern name to trigger (for 'trigger')"`
+	Variables    []bitbucket.PipelineVariable `json:"variables,omitempty" jsonschema:"Pipeline variables for this run, e.g. [{key: FLAVOUR, value: release}] (for 'trigger')"`
+	Page         int                          `json:"page,omitempty" jsonschema:"Page number"`
+	Pagelen      int                          `json:"pagelen,omitempty" jsonschema:"Results per page"`
+	Sort         string                       `json:"sort,omitempty" jsonschema:"Sort field"`
+	Status       string                       `json:"status,omitempty" jsonschema:"Filter by status"`
+	Commit       string                       `json:"commit,omitempty" jsonschema:"Commit hash to run on (for 'trigger'). With ref_name: that ref at this commit; alone: the bare commit"`
 }
 
 // ManagePipelinesHandler handles the consolidated pipeline operations.
@@ -60,8 +64,8 @@ func ManagePipelinesHandler(c *bitbucket.Client) func(context.Context, *mcp.Call
 			return ToolResultText(string(data)), nil, nil
 
 		case "trigger":
-			if args.RefName == "" {
-				return ToolResultError("ref_name is required for 'trigger' action"), nil, nil
+			if args.RefName == "" && args.Commit == "" {
+				return ToolResultError("ref_name or commit is required for 'trigger' action"), nil, nil
 			}
 			pipe, err := c.TriggerPipeline(bitbucket.TriggerPipelineArgs{
 				Workspace: args.Workspace,
@@ -69,6 +73,8 @@ func ManagePipelinesHandler(c *bitbucket.Client) func(context.Context, *mcp.Call
 				RefType:   args.RefType,
 				RefName:   args.RefName,
 				Pattern:   args.Pattern,
+				Variables: args.Variables,
+				Commit:    args.Commit,
 			})
 			if err != nil {
 				return ToolResultError(fmt.Sprintf("failed to trigger pipeline: %v", err)), nil, nil
@@ -88,6 +94,33 @@ func ManagePipelinesHandler(c *bitbucket.Client) func(context.Context, *mcp.Call
 				return ToolResultError(fmt.Sprintf("failed to stop pipeline: %v", err)), nil, nil
 			}
 			return ToolResultText("Pipeline stopped successfully"), nil, nil
+
+		case "wait":
+			if args.PipelineUUID == "" {
+				return ToolResultError("pipeline_uuid is required for 'wait' action"), nil, nil
+			}
+			secs := args.WaitSeconds
+			if secs <= 0 {
+				secs = 300
+			}
+			secs = min(secs, 1800)
+			pipe, err := c.WaitPipeline(ctx, bitbucket.WaitPipelineArgs{
+				GetPipelineArgs: bitbucket.GetPipelineArgs{
+					Workspace:    args.Workspace,
+					RepoSlug:     args.RepoSlug,
+					PipelineUUID: args.PipelineUUID,
+				},
+				Timeout: time.Duration(secs) * time.Second,
+			})
+			if pipe == nil {
+				return ToolResultError(fmt.Sprintf("failed to wait for pipeline: %v", err)), nil, nil
+			}
+			data, _ := json.MarshalIndent(pipe, "", "  ")
+			if err != nil {
+				// Timed out (or cancelled): still useful to hand back the latest state.
+				return ToolResultText(fmt.Sprintf("Pipeline not finished after waiting (%v). Latest state:\n%s", err, data)), nil, nil
+			}
+			return ToolResultText(string(data)), nil, nil
 
 		case "list-steps":
 			if args.PipelineUUID == "" {
