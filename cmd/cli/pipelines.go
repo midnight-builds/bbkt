@@ -26,6 +26,7 @@ Alias: pipe`,
   bbkt pipelines trigger -r main              # run default pipeline on main
   bbkt pipelines trigger -r feature/x --pattern deploy   # run a custom: pipeline
   bbkt pipelines trigger -r main --pattern build --var FLAVOUR=release   # with variables
+  bbkt pipelines trigger -r main --commit 1a2b3c4d --pattern deploy   # rerun at an older commit
   bbkt pipelines watch {pipeline-uuid}        # follow until done; non-zero exit unless SUCCESSFUL
   bbkt pipelines steps {pipeline-uuid}
   bbkt pipelines log {pipeline-uuid} {step-uuid}
@@ -177,9 +178,10 @@ var pipelinesTriggerCmd = &cobra.Command{
 			return err
 		}
 		variables = append(variables, secured...)
+		commit, _ := cmd.Flags().GetString("commit")
 
 		interactive := false
-		if refName == "" {
+		if refName == "" && commit == "" {
 			if outputJSON(cmd) {
 				return fmt.Errorf("missing required flag --ref-name under --json (interactive prompts are disabled in --json mode)")
 			}
@@ -221,8 +223,8 @@ var pipelinesTriggerCmd = &cobra.Command{
 			}
 		}
 
-		if refName == "" {
-			return fmt.Errorf("ref-name is required")
+		if refName == "" && commit == "" {
+			return fmt.Errorf("ref-name or commit is required")
 		}
 
 		if interactive {
@@ -237,6 +239,7 @@ var pipelinesTriggerCmd = &cobra.Command{
 			RefType:   refType,
 			Pattern:   pattern,
 			Variables: variables,
+			Commit:    commit,
 		})
 		if err != nil {
 			return err
@@ -480,6 +483,7 @@ func init() {
 	// No -p shorthand: it collides with the global persistent --profile (-p),
 	// which panics cobra when the flags merge. Long --pattern only.
 	pipelinesTriggerCmd.Flags().String("pattern", "", "Name of a 'custom:' pipeline from bitbucket-pipelines.yml (omit to run the branch's default pipeline)")
+	pipelinesTriggerCmd.Flags().String("commit", "", "Commit hash to run on: with --ref-name, that branch at this commit; alone, the bare commit (pair with --pattern)")
 	pipelinesTriggerCmd.Flags().StringArray("var", nil, "Pipeline variable KEY=VALUE (repeatable)")
 	pipelinesTriggerCmd.Flags().StringArray("secured-var", nil, "Secured pipeline variable KEY=VALUE, masked in logs (repeatable)")
 }

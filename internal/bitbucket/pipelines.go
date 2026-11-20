@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"time"
 )
 
@@ -141,26 +142,37 @@ type TriggerPipelineArgs struct {
 	RefType   string             `json:"ref_type,omitempty" jsonschema:"Reference type: branch or tag (default branch)"`
 	Pattern   string             `json:"pattern,omitempty" jsonschema:"Custom pipeline pattern name to trigger"`
 	Variables []PipelineVariable `json:"variables,omitempty" jsonschema:"Pipeline variables for this run"`
+	Commit    string             `json:"commit,omitempty" jsonschema:"Commit hash to run on. With ref_name: that ref at this commit. Alone: the bare commit (usually needs pattern)"`
 }
 
-// TriggerPipeline triggers a new pipeline run.
-func (c *Client) TriggerPipeline(args TriggerPipelineArgs) (*Pipeline, error) {
-	if args.Workspace == "" || args.RepoSlug == "" || args.RefName == "" {
-		return nil, fmt.Errorf("workspace, repo_slug, and ref_name are required")
-	}
+var commitHashRe = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
 
-	refType := args.RefType
-	if refType == "" {
-		refType = "branch"
+// TriggerPipeline triggers a new pipeline run on a ref, a ref at a commit, or a bare commit.
+func (c *Client) TriggerPipeline(args TriggerPipelineArgs) (*Pipeline, error) {
+	if args.Workspace == "" || args.RepoSlug == "" || (args.RefName == "" && args.Commit == "") {
+		return nil, fmt.Errorf("workspace, repo_slug, and ref_name or commit are required")
 	}
 
 	body := TriggerPipelineRequest{
-		Target: PipeTriggerTarget{
+		Target:    PipeTriggerTarget{Type: "pipeline_commit_target"},
+		Variables: args.Variables,
+	}
+	if args.RefName != "" {
+		refType := args.RefType
+		if refType == "" {
+			refType = "branch"
+		}
+		body.Target = PipeTriggerTarget{
 			Type:    "pipeline_ref_target",
 			RefType: refType,
 			RefName: args.RefName,
-		},
-		Variables: args.Variables,
+		}
+	}
+	if args.Commit != "" {
+		if !commitHashRe.MatchString(args.Commit) {
+			return nil, fmt.Errorf("commit must be a hex commit hash, got %q", args.Commit)
+		}
+		body.Target.Commit = &PipeCommitRef{Type: "commit", Hash: args.Commit}
 	}
 
 	if args.Pattern != "" {

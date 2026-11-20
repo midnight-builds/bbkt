@@ -25,6 +25,7 @@ type ManagePipelinesArgs struct {
 	Pagelen      int                          `json:"pagelen,omitempty" jsonschema:"Results per page"`
 	Sort         string                       `json:"sort,omitempty" jsonschema:"Sort field"`
 	Status       string                       `json:"status,omitempty" jsonschema:"Filter by status"`
+	Commit       string                       `json:"commit,omitempty" jsonschema:"Commit hash to run on (for 'trigger'). With ref_name: that ref at this commit; alone: the bare commit"`
 }
 
 // ManagePipelinesHandler handles the consolidated pipeline operations.
@@ -63,8 +64,8 @@ func ManagePipelinesHandler(c *bitbucket.Client) func(context.Context, *mcp.Call
 			return ToolResultText(string(data)), nil, nil
 
 		case "trigger":
-			if args.RefName == "" {
-				return ToolResultError("ref_name is required for 'trigger' action"), nil, nil
+			if args.RefName == "" && args.Commit == "" {
+				return ToolResultError("ref_name or commit is required for 'trigger' action"), nil, nil
 			}
 			pipe, err := c.TriggerPipeline(bitbucket.TriggerPipelineArgs{
 				Workspace: args.Workspace,
@@ -73,6 +74,7 @@ func ManagePipelinesHandler(c *bitbucket.Client) func(context.Context, *mcp.Call
 				RefName:   args.RefName,
 				Pattern:   args.Pattern,
 				Variables: args.Variables,
+				Commit:    args.Commit,
 			})
 			if err != nil {
 				return ToolResultError(fmt.Sprintf("failed to trigger pipeline: %v", err)), nil, nil
