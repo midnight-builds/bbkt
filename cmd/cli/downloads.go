@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -81,29 +83,10 @@ var downloadsGetCmd = &cobra.Command{
 		if out == "" {
 			out = filepath.Base(name)
 		}
-		if _, err := os.Stat(out); err == nil && !force {
-			return fmt.Errorf("%s already exists (use --force to overwrite)", out)
-		}
-
-		// Write to a temp file beside the target so a failed download never
-		// leaves a partial file under the final name.
-		tmp, err := os.CreateTemp(filepath.Dir(out), ".bbkt-download-*")
+		n, err := saveDownload(out, force, func(f *os.File) (int64, error) {
+			return getClient().GetDownload(bitbucket.GetDownloadArgs{Workspace: workspace, RepoSlug: repoSlug, Name: name}, f)
+		})
 		if err != nil {
-			return err
-		}
-		defer os.Remove(tmp.Name()) // no-op after a successful rename
-
-		n, err := getClient().GetDownload(bitbucket.GetDownloadArgs{Workspace: workspace, RepoSlug: repoSlug, Name: name}, tmp)
-		if cerr := tmp.Close(); err == nil {
-			err = cerr
-		}
-		if err != nil {
-			return err
-		}
-		if force {
-			_ = os.Remove(out) // Windows rename does not replace an existing file
-		}
-		if err := os.Rename(tmp.Name(), out); err != nil {
 			return err
 		}
 
@@ -112,6 +95,39 @@ var downloadsGetCmd = &cobra.Command{
 		})
 		return nil
 	},
+}
+
+// saveDownload writes fetch's output to out and removes what it wrote on failure.
+// Without force, out is created with O_EXCL, so an existing file (or one another
+// process creates first) is never replaced. With force, it downloads to a temp
+// file beside out and renames over it, so the old file survives a failed transfer.
+func saveDownload(out string, force bool, fetch func(*os.File) (int64, error)) (int64, error) {
+	var f *os.File
+	var err error
+	if force {
+		f, err = os.CreateTemp(filepath.Dir(out), ".bbkt-download-*")
+	} else {
+		f, err = os.OpenFile(out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if errors.Is(err, fs.ErrExist) {
+			return 0, fmt.Errorf("%s already exists (use --force to overwrite)", out)
+		}
+	}
+	if err != nil {
+		return 0, err
+	}
+
+	n, err := fetch(f)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil && force {
+		err = os.Rename(f.Name(), out) // replaces out on Unix and Windows alike
+	}
+	if err != nil {
+		_ = os.Remove(f.Name())
+		return n, err
+	}
+	return n, nil
 }
 
 func formatBytes(n int64) string {
